@@ -41,9 +41,15 @@ func New() (iface *Intface) {
 	return
 }
 
+// Send : send a command to interface
+func (iface *Intface) Send(command, data string) (n int, err error) {
+	n, err = iface.pipe.SendMessage(command, data)
+	return
+}
+
 // Recv : wait for a message from the interface
 func (iface *Intface) Recv() (msg []string, err error) {
-	msg, err = iface.pipe.RecvMessage(0)
+	msg, err = iface.pipe.RecvMessage(zmq.DONTWAIT)
 	return
 }
 
@@ -186,9 +192,14 @@ func (agent *Agent) controlMessage() (err error) {
 	}
 	command := msg[0]
 
-	// No control commands implemented yet
 	switch command {
-	case "EXAMPLE":
+	case "BROADCAST":
+		// data, err := agent.pipe.RecvBytes(0)
+		data := msg[1]
+		for _, peer := range agent.peers {
+			fmt.Println("Sending broadcast")
+			peer.send(data)
+		}
 	default:
 	}
 
