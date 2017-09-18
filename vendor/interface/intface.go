@@ -174,7 +174,7 @@ func (agent *Agent) routerLoop() {
 }
 
 func (agent *Agent) createPeer(uuid uuid.UUID, peerAddr string) (peer *Peer) {
-	peer = newPeer(agent, uuid, peerAddr)
+	peer = newPeer(agent, peerAddr)
 	agent.peers[uuid.String()] = peer
 
 	// Report peer joined the network
@@ -279,11 +279,11 @@ func (iface *Intface) agent() {
 			pingAt = now.Add(pingInterval)
 		}
 		// Delete and report any expired peers
-		for _, peer := range agent.peers {
+		for id, peer := range agent.peers {
 			if time.Now().After(peer.expiresAt) {
 				// Report peer left the network
-				agent.pipe.SendMessage("LEFT", peer.uuidString)
-				delete(agent.peers, peer.uuidString)
+				agent.pipe.SendMessage("LEFT", id)
+				delete(agent.peers, id)
 			}
 		}
 	}

@@ -6,7 +6,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pborman/uuid"
 	zmq "github.com/pebbe/zmq4"
 )
 
@@ -16,17 +15,15 @@ const (
 
 // Peer : Defines each peer that we discover and track
 type Peer struct {
-	hello      bool        // HELLO message received from peer
-	connected  bool        // Determines if the socket is connected
-	endpoint   string      // Endpoint of the dealer
-	dealer     *zmq.Socket // Connection to peer using DEALER socket
-	uuidBytes  []byte
-	uuidString string
-	expiresAt  time.Time
+	hello     bool        // HELLO message received from peer
+	connected bool        // Determines if the socket is connected
+	endpoint  string      // Endpoint of the dealer; used in disconnect
+	dealer    *zmq.Socket // Connection to peer using DEALER socket
+	expiresAt time.Time
 }
 
 // Constructor for the peer class
-func newPeer(agent *Agent, uuid uuid.UUID, peerAddr string) (peer *Peer) {
+func newPeer(agent *Agent, peerAddr string) (peer *Peer) {
 	dealer, err := zmq.NewSocket(zmq.DEALER)
 	if err != nil {
 		panic(err)
@@ -55,22 +52,18 @@ func newPeer(agent *Agent, uuid uuid.UUID, peerAddr string) (peer *Peer) {
 	}()
 
 	peer = &Peer{
-		connected:  true,
-		endpoint:   endpoint,
-		dealer:     dealer,
-		uuidBytes:  []byte(uuid),
-		uuidString: uuid.String(),
+		connected: true,
+		endpoint:  endpoint,
+		dealer:    dealer,
 	}
 	return
 }
 
-// TODO przetestować
-// TODO reconnect!
-func (peer *Peer) send(msg string) (n int, err error) {
+func (peer *Peer) send(args []string) (n int, err error) {
 	if peer.connected {
-		n, err = peer.dealer.SendMessage(msg)
-		// High-water mark reached
+		n, err = peer.dealer.SendMessage(args)
 		if err == zmq.AsErrno(syscall.EAGAIN) {
+			fmt.Println("Unexpected err: High-water mark reached")
 			peer.disconnect()
 		}
 	}
