@@ -75,13 +75,13 @@ type beacon struct {
 
 // Agent : Background's context
 type Agent struct {
-	pipe       *zmq.Socket      // Pipe back to application
-	udp        *zmq.Socket      // Pipe to goroutine listening for beacons
-	conn       net.PacketConn   // UDP socket for discovery
-	router     *zmq.Socket      // Router socket for receiving messages
-	port       string           // Port the router is bound to
-	peers      map[string]*Peer // Hash of known peers, fast lookup
-	uuidBytes  []byte           // This node UUID
+	pipe       *zmq.Socket        // Pipe back to application
+	udp        *zmq.Socket        // Pipe to goroutine listening for beacons
+	conn       net.PacketConn     // UDP socket for discovery
+	router     *zmq.Socket        // Router socket for receiving messages
+	port       string             // Port the router is bound to
+	peers      *concurrentPeerMap // Hash of known peers, fast lookup
+	uuidBytes  []byte             // This node's UUID
 	uuidString string
 }
 
@@ -136,7 +136,7 @@ func newAgent(uuid uuid.UUID) *Agent {
 		conn:       conn,
 		router:     router,
 		port:       port,
-		peers:      make(map[string]*Peer),
+		peers:      newConcurrentPeerMap(),
 		uuidBytes:  []byte(uuid),
 		uuidString: uuid.String(),
 	}
@@ -166,7 +166,7 @@ func (agent *Agent) routerLoop() {
 
 		id := msg[0]
 		header := msg[1]
-		peer, ok := agent.peers[id]
+		peer, ok := agent.peers.get(id)
 
 		// Discard messages until HELLO is received
 		if header != "HELLO" && (!ok || !peer.hello) {
@@ -194,16 +194,17 @@ func (agent *Agent) routerLoop() {
 
 func (agent *Agent) createPeer(uuid uuid.UUID, peerAddr string) (peer *Peer) {
 	peer = newPeer(agent, peerAddr)
-	agent.peers[uuid.String()] = peer
+	agent.peers.insert(uuid.String(), peer)
 	return
 }
 
 func (agent *Agent) broadcast(args []string) {
-	for _, peer := range agent.peers {
+	for _, peer := range agent.peers.lockAndGetReference() {
 		if _, err := peer.send(args); err != nil {
 			panic(err)
 		}
 	}
+	agent.peers.unlock()
 }
 
 // Handle different control messages from the front-end
@@ -229,7 +230,7 @@ func (agent *Agent) controlMessage() (err error) {
 	// 	}
 	case "RVR": // Request Vote Response
 		peerID := msg[3]
-		peer, ok := agent.peers[peerID]
+		peer, ok := agent.peers.get(peerID)
 		if !ok {
 			text := fmt.Sprintf("RVR err: peer (%s) not found\n", peerID)
 			return errors.New(text)
@@ -256,7 +257,7 @@ func (agent *Agent) handleBeacon() (err error) {
 	if bytes.Compare(uuid, agent.uuidBytes) != 0 {
 		// Find or create peer via its UUID string
 		uuidString := uuid.String()
-		peer, ok := agent.peers[uuidString]
+		peer, ok := agent.peers.get(uuidString)
 		if !ok {
 			fmt.Println("BEACON:", peerAddr)
 			peer = agent.createPeer(uuid, peerAddr)
@@ -320,12 +321,14 @@ func (iface *MessagingInterface) agent(uuid uuid.UUID) {
 			pingAt = now.Add(pingInterval)
 		}
 		// Delete and report any expired peers
-		for id, peer := range agent.peers {
+		peers := agent.peers.lockAndGetReference()
+		for id, peer := range peers {
 			if time.Now().After(peer.expiresAt) {
 				// Report peer left the network
 				agent.pipe.SendMessage("LEFT", id)
-				delete(agent.peers, id)
+				delete(peers, id)
 			}
 		}
+		agent.peers.unlock()
 	}
 }
