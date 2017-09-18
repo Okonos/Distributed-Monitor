@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -19,36 +20,41 @@ import (
 // =====================================================================
 // Synchronous part, works in application thread
 
-// Intface : an excuse to start the background thread, and a wrapper around recv
-type Intface struct {
+// MessagingInterface : an excuse to start the background thread
+// also a wrapper around send and recv
+type MessagingInterface struct {
 	pipe *zmq.Socket // Pipe through to agent
 }
 
 // New : Constructor for the interface class
-func New() (iface *Intface) {
-	iface = &Intface{}
+func New(uuid uuid.UUID) (iface *MessagingInterface) {
+	iface = &MessagingInterface{}
 	var err error
 	iface.pipe, err = zmq.NewSocket(zmq.PAIR)
 	if err != nil {
 		panic(err)
 	}
-	err = iface.pipe.Bind("inproc://iface")
-	if err != nil {
+	if err = iface.pipe.Bind("inproc://iface"); err != nil {
 		panic(err)
 	}
-	go iface.agent()
+	go iface.agent(uuid)
 	time.Sleep(100 * time.Millisecond)
 	return
 }
 
 // Send : send a command to interface
-func (iface *Intface) Send(command, data string) (n int, err error) {
-	n, err = iface.pipe.SendMessage(command, data)
-	return
+func (iface *MessagingInterface) Send(command string, args ...string) (int, error) {
+	sendArgs := make([]interface{}, len(args)+1)
+	sendArgs[0] = command
+	for i, v := range args {
+		sendArgs[i+1] = v
+	}
+	n, err := iface.pipe.SendMessage(sendArgs...)
+	return n, err
 }
 
 // Recv : wait for a message from the interface
-func (iface *Intface) Recv() (msg []string, err error) {
+func (iface *MessagingInterface) Recv() (msg []string, err error) {
 	msg, err = iface.pipe.RecvMessage(zmq.DONTWAIT)
 	return
 }
@@ -80,7 +86,7 @@ type Agent struct {
 }
 
 // Each interface has one agent object, which implements its background thread
-func newAgent() *Agent {
+func newAgent(uuid uuid.UUID) *Agent {
 	rand.Seed(time.Now().UnixNano())
 
 	bcast := &syscall.SockaddrInet4{
@@ -123,7 +129,6 @@ func newAgent() *Agent {
 	port := strings.Split(endpoint, ":")[2]
 	fmt.Println("PORT:", port)
 
-	uuid := uuid.NewRandom()
 	fmt.Println("UUID:", uuid)
 	agent := &Agent{
 		pipe:       pipe,
@@ -139,15 +144,25 @@ func newAgent() *Agent {
 	go agent.routerLoop()
 
 	return agent
-
 }
 
 func (agent *Agent) routerLoop() {
+	// pipe to the server main thread
+	serverPipe, err := zmq.NewSocket(zmq.PAIR)
+	if err != nil {
+		panic(err)
+	}
+	if err := serverPipe.Connect("inproc://server"); err != nil {
+		panic(err)
+	}
+
 	for {
 		msg, err := agent.router.RecvMessage(0)
 		if err != nil {
-			fmt.Println("ROUTER ERR:", err)
+			fmt.Fprintln(os.Stderr, "ROUTER ERR:", err)
 		}
+
+		// DEBUG fmt.Printf("router %T, %s, %d\n", msg, msg, len(msg))
 
 		id := msg[0]
 		header := msg[1]
@@ -158,8 +173,7 @@ func (agent *Agent) routerLoop() {
 			continue
 		}
 
-		switch header {
-		case "HELLO":
+		if header == "HELLO" {
 			fmt.Println("HELLO received from", id)
 			if !ok {
 				uuidBytes := uuid.Parse(id)
@@ -167,20 +181,29 @@ func (agent *Agent) routerLoop() {
 				peer = agent.createPeer(uuidBytes, peerAddr)
 			}
 			peer.hello = true
+			peer.isAlive()
+			continue
 		}
 
 		peer.isAlive()
+
+		// else send to server thread
+		serverPipe.SendMessage(msg)
 	}
 }
 
 func (agent *Agent) createPeer(uuid uuid.UUID, peerAddr string) (peer *Peer) {
 	peer = newPeer(agent, peerAddr)
 	agent.peers[uuid.String()] = peer
-
-	// Report peer joined the network
-	agent.pipe.SendMessage("JOINED", uuid)
-
 	return
+}
+
+func (agent *Agent) broadcast(args []string) {
+	for _, peer := range agent.peers {
+		if _, err := peer.send(args); err != nil {
+			panic(err)
+		}
+	}
 }
 
 // Handle different control messages from the front-end
@@ -192,14 +215,26 @@ func (agent *Agent) controlMessage() (err error) {
 	}
 	command := msg[0]
 
+	fmt.Println("DDD controlMessage:", msg)
+
 	switch command {
-	case "BROADCAST":
-		// data, err := agent.pipe.RecvBytes(0)
-		data := msg[1]
-		for _, peer := range agent.peers {
-			fmt.Println("Sending broadcast")
-			peer.send(data)
+	case "RV": // Request Vote RPC
+		agent.broadcast(msg)
+	// case "BROADCAST":
+	// 	// data, err := agent.pipe.RecvBytes(0)
+	// 	data := msg[1]
+	// 	for _, peer := range agent.peers {
+	// 		fmt.Println("Sending broadcast")
+	// 		peer.send(data)
+	// 	}
+	case "RVR": // Request Vote Response
+		peerID := msg[3]
+		peer, ok := agent.peers[peerID]
+		if !ok {
+			text := fmt.Sprintf("RVR err: peer (%s) not found\n", peerID)
+			return errors.New(text)
 		}
+		peer.send(msg[:3])
 	default:
 	}
 
@@ -225,6 +260,8 @@ func (agent *Agent) handleBeacon() (err error) {
 		if !ok {
 			fmt.Println("BEACON:", peerAddr)
 			peer = agent.createPeer(uuid, peerAddr)
+			// Report peer joined the network
+			agent.pipe.SendMessage("JOINED", uuid)
 		}
 		// Any activity from the peer means it's alive
 		peer.isAlive()
@@ -235,8 +272,8 @@ func (agent *Agent) handleBeacon() (err error) {
 // Main loop for the background agent.
 // zmq_poll monitors the front-end pipe (commands from the API)
 // and the back-end UDP handle (beacons):
-func (iface *Intface) agent() {
-	agent := newAgent()
+func (iface *MessagingInterface) agent(uuid uuid.UUID) {
+	agent := newAgent(uuid)
 
 	// Send first beacon immediately
 	pingAt := time.Now()
@@ -262,11 +299,15 @@ func (iface *Intface) agent() {
 			case agent.pipe:
 				// If we had activity on the pipe, go handle the control
 				// message. Current code never sends control messages.
-				agent.controlMessage()
+				if err := agent.controlMessage(); err != nil {
+					fmt.Fprintln(os.Stderr, "agent.controlMessage err:", err)
+				}
 
 			case agent.udp:
 				// If we had input on the UDP socket, go process that
-				agent.handleBeacon()
+				if err := agent.handleBeacon(); err != nil {
+					fmt.Fprintln(os.Stderr, "agent.handleBeacon err:", err)
+				}
 			}
 		}
 
