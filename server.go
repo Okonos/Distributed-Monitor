@@ -21,12 +21,8 @@ const (
 	leader
 )
 
-type varStruct interface {
-	resetVars()
-}
-
 type candidateVars struct {
-	votesResponded map[string]bool
+	votesResponded map[string]bool // imitates set
 	votesGranted   map[string]bool
 }
 
@@ -37,7 +33,7 @@ func newCandidateVars() *candidateVars {
 	}
 }
 
-func (cv *candidateVars) resetVars() {
+func (cv *candidateVars) reset() {
 	for k := range cv.votesResponded {
 		delete(cv.votesResponded, k)
 	}
@@ -46,13 +42,23 @@ func (cv *candidateVars) resetVars() {
 	}
 }
 
-// TODO
 type leaderVars struct {
-	nextIndex  []int
-	matchIndex []int
+	nextIndex  map[string]int
+	matchIndex map[string]int
 }
 
-func (lv *leaderVars) resetVars() {
+func newLeaderVars() *leaderVars {
+	return &leaderVars{
+		nextIndex:  make(map[string]int),
+		matchIndex: make(map[string]int),
+	}
+}
+
+func (lv *leaderVars) reset(servers []string, lastLogIndex int) {
+	for _, id := range servers {
+		lv.nextIndex[id] = lastLogIndex + 1
+		lv.matchIndex[id] = 0
+	}
 }
 
 type server struct {
@@ -60,9 +66,11 @@ type server struct {
 	iface       *intface.MessagingInterface
 	elog        *entryLog
 	currentTerm int
+	votedFor    uuid.UUID // the candidate the server voted for in the current term
 	state       serverState
-	votedFor    uuid.UUID // the candidate the server voted in the current term
+	servers     map[string]bool // set of other servers (len has to be incremented)
 	cVars       *candidateVars
+	lVars       *leaderVars
 }
 
 func newServer() *server {
@@ -72,9 +80,44 @@ func newServer() *server {
 		iface:       intface.New(uuid),
 		elog:        newLog(),
 		currentTerm: 0,
-		state:       follower,
 		votedFor:    nil,
+		state:       follower,
+		servers:     make(map[string]bool),
 		cVars:       newCandidateVars(),
+		lVars:       newLeaderVars(),
+	}
+}
+
+func (s *server) getServersIDs() []string {
+	i := 0
+	ids := make([]string, len(s.servers))
+	for id := range s.servers {
+		ids[i] = id
+		i++
+	}
+	return ids
+}
+
+func (s *server) getNumberOfServers() int {
+	// this one + all the others that this one knows of
+	return len(s.servers) + 1
+}
+
+func (s *server) handleControlMessage(msg []string) {
+	serverID := msg[1]
+	switch msg[0] {
+	case "JOINED":
+		s.servers[serverID] = true
+		if s.state == leader {
+			s.lVars.nextIndex[serverID] = s.elog.lastIndex()
+			s.lVars.matchIndex[serverID] = 0
+		}
+	case "LEFT":
+		delete(s.servers, serverID)
+		if s.state == leader {
+			delete(s.lVars.nextIndex, serverID)
+			delete(s.lVars.matchIndex, serverID)
+		}
 	}
 }
 
@@ -119,9 +162,6 @@ func (s *server) handleRequestVote(msg []string) {
 	fmt.Println("XXX handleRequestVote: voteGranted ==", voteGranted)
 }
 
-// TODO
-const n = 2
-
 func (s *server) handleRequestVoteResponse(msg []string) {
 	fmt.Println("YYY handleRequestVoteResponse:", msg)
 
@@ -131,9 +171,11 @@ func (s *server) handleRequestVoteResponse(msg []string) {
 		s.cVars.votesGranted[serverID] = true
 	}
 
+	n := s.getNumberOfServers()
 	if len(s.cVars.votesGranted)*2 >= n {
 		fmt.Println("candidate -> leader")
-		// s.state = leader
+		// TODO s.state = leader
+		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
 	}
 }
 
@@ -157,23 +199,26 @@ func (s *server) loop() {
 		msg, err := s.iface.Recv()
 		if err == nil {
 			fmt.Println("server", msg)
-			msgType = msg[1]
 
-			// TODO struct zamiast []string? Wtedy niepotrzebne ify?
-			if msgType == "RV" {
-				term, err := strconv.Atoi(msg[2])
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "term conv err:", err)
-				}
+			if len(msg) == 2 { // server JOINED/LEFT
+				s.handleControlMessage(msg)
+			} else {
+				msgType = msg[1]
+				if msgType == "RV" {
+					term, err := strconv.Atoi(msg[2])
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "term conv err:", err)
+					}
 
-				// "if candidate's or leader's term is out of date,
-				// it immediately reverts to follower state"
-				if term > s.currentTerm {
-					fmt.Println("candidate -> follower")
-					s.state = follower
-					s.currentTerm = term
-					s.votedFor = nil
-					resetElectionTimeout()
+					// "if candidate's or leader's term is out of date,
+					// it immediately reverts to follower state"
+					if term > s.currentTerm {
+						fmt.Println("candidate -> follower")
+						s.state = follower
+						s.currentTerm = term
+						s.votedFor = nil
+						resetElectionTimeout()
+					}
 				}
 			}
 		}
@@ -193,7 +238,7 @@ func (s *server) loop() {
 			if time.Now().After(timeout) {
 				fmt.Println("follower -> candidate")
 				s.state = candidate
-				s.cVars.resetVars()
+				s.cVars.reset()
 			}
 		case candidate:
 			// TODO napisać funkcje konwersji stanów? bo votedFor trza zerować
