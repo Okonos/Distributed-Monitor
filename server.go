@@ -10,7 +10,6 @@ import (
 	"interface"
 
 	"github.com/pborman/uuid"
-	zmq "github.com/pebbe/zmq4"
 )
 
 // Server states
@@ -59,7 +58,6 @@ func (lv *leaderVars) resetVars() {
 type server struct {
 	uuid        uuid.UUID
 	iface       *intface.MessagingInterface
-	pipe        *zmq.Socket // pipe to the router thread
 	elog        *entryLog
 	currentTerm int
 	state       serverState
@@ -69,17 +67,9 @@ type server struct {
 
 func newServer() *server {
 	uuid := uuid.NewRandom()
-	pipe, err := zmq.NewSocket(zmq.PAIR)
-	if err != nil {
-		panic(err)
-	}
-	if err := pipe.Bind("inproc://server"); err != nil {
-		panic(err)
-	}
 	return &server{
 		uuid:        uuid,
 		iface:       intface.New(uuid),
-		pipe:        pipe,
 		elog:        newLog(),
 		currentTerm: 0,
 		state:       follower,
@@ -164,7 +154,7 @@ func (s *server) loop() {
 
 	for {
 		var msgType string
-		msg, err := s.pipe.RecvMessage(zmq.DONTWAIT)
+		msg, err := s.iface.Recv()
 		if err == nil {
 			fmt.Println("server", msg)
 			msgType = msg[1]

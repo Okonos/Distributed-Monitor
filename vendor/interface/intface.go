@@ -147,15 +147,6 @@ func newAgent(uuid uuid.UUID) *Agent {
 }
 
 func (agent *Agent) routerLoop() {
-	// pipe to the server main thread
-	serverPipe, err := zmq.NewSocket(zmq.PAIR)
-	if err != nil {
-		panic(err)
-	}
-	if err := serverPipe.Connect("inproc://server"); err != nil {
-		panic(err)
-	}
-
 	for {
 		msg, err := agent.router.RecvMessage(0)
 		if err != nil {
@@ -188,7 +179,7 @@ func (agent *Agent) routerLoop() {
 		peer.isAlive()
 
 		// else send to server thread
-		serverPipe.SendMessage(msg)
+		agent.pipe.SendMessage(msg)
 	}
 }
 
