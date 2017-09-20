@@ -185,7 +185,7 @@ func (s *server) handleRequestVoteResponse(msg []string) {
 
 	n := s.getNumberOfServers()
 	if len(s.cVars.votesGranted)*2 >= n {
-		fmt.Println("candidate -> leader")
+		fmt.Println("candidate -> leader | term:", s.currentTerm)
 		// TODO s.state = leader
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
 	}
@@ -221,7 +221,7 @@ func (s *server) loop() {
 				// it immediately reverts to follower state"
 				if term, err := strconv.Atoi(msg[2]); err == nil {
 					if term > s.currentTerm {
-						fmt.Println(s.state, "-> follower")
+						fmt.Println(s.state, "-> follower | term:", s.currentTerm)
 						s.state = follower
 						s.currentTerm = term
 						s.votedFor = nil
@@ -246,7 +246,7 @@ func (s *server) loop() {
 
 			// check election timeout
 			if time.Now().After(timeout) {
-				fmt.Println("follower -> candidate")
+				fmt.Println("follower -> candidate | term:", s.currentTerm)
 				s.state = candidate
 				s.cVars.reset()
 			}
