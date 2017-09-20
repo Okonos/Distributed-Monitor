@@ -15,6 +15,18 @@ import (
 // Server states
 type serverState int
 
+func (state serverState) String() (s string) {
+	switch state {
+	case follower:
+		s = "follower"
+	case candidate:
+		s = "candidate"
+	case leader:
+		s = "leader"
+	}
+	return
+}
+
 const (
 	follower serverState = iota
 	candidate
@@ -204,21 +216,19 @@ func (s *server) loop() {
 				s.handleControlMessage(msg)
 			} else {
 				msgType = msg[1]
-				if msgType == "RV" {
-					term, err := strconv.Atoi(msg[2])
-					if err != nil {
-						fmt.Fprintln(os.Stderr, "term conv err:", err)
-					}
 
-					// "if candidate's or leader's term is out of date,
-					// it immediately reverts to follower state"
+				// "if candidate's or leader's term is out of date,
+				// it immediately reverts to follower state"
+				if term, err := strconv.Atoi(msg[2]); err == nil {
 					if term > s.currentTerm {
-						fmt.Println("candidate -> follower")
+						fmt.Println(s.state, "-> follower")
 						s.state = follower
 						s.currentTerm = term
 						s.votedFor = nil
 						resetElectionTimeout()
 					}
+				} else {
+					fmt.Fprintln(os.Stderr, "term conv err:", err)
 				}
 			}
 		}
@@ -240,6 +250,7 @@ func (s *server) loop() {
 				s.state = candidate
 				s.cVars.reset()
 			}
+
 		case candidate:
 			// TODO napisać funkcje konwersji stanów? bo votedFor trza zerować
 			// zrobione powyżej
@@ -261,6 +272,7 @@ func (s *server) loop() {
 				// send requestVote RPC
 				s.requestVote()
 			}
+
 		case leader:
 		}
 	}
