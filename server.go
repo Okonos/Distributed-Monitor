@@ -87,9 +87,10 @@ func newLeaderVars() *leaderVars {
 }
 
 func (lv *leaderVars) reset(servers []string, lastLogIndex int) {
+	// XXX in paper first index is 1!
 	for _, id := range servers {
 		lv.nextIndex[id] = lastLogIndex + 1
-		lv.matchIndex[id] = 0
+		lv.matchIndex[id] = -1
 	}
 }
 

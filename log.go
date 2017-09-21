@@ -17,10 +17,8 @@ func newLog() *entryLog {
 	}
 }
 
+// XXX in paper first index is 1!
 func (l *entryLog) lastIndex() int {
-	if len(l.entries) == 0 {
-		return 0
-	}
 	return len(l.entries) - 1
 }
 
@@ -36,7 +34,9 @@ func (l *entryLog) candidateIsUpToDate(term, index int) bool {
 	logLen := len(l.entries)
 	logTerm := l.lastTerm()
 	if term == logTerm {
-		return index >= logLen
+		// XXX since this checks which log is longer, the index must be incremented
+		// (indexing from 0 as opposed to indexing from one in paper)
+		return index+1 >= logLen
 	}
 	return term > logTerm
 }
