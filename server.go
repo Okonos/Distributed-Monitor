@@ -1,10 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
-	"strconv"
 	"time"
 
 	"interface"
@@ -32,6 +33,25 @@ const (
 	candidate
 	leader
 )
+
+type requestVoteMsg struct {
+	Term         int
+	LastLogIndex int
+	LastLogTerm  int
+}
+
+type requestVoteRespMsg struct {
+	Term        int
+	VoteGranted bool
+}
+
+type appendEntriesMsg struct {
+	Term         int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []entry // log entries to store (empty for heartbeat)
+	LeaderCommit int     // leader's commitIndex
+}
 
 type candidateVars struct {
 	votesResponded map[string]bool // imitates set
@@ -115,79 +135,94 @@ func (s *server) getNumberOfServers() int {
 	return len(s.servers) + 1
 }
 
-func (s *server) handleControlMessage(msg []string) {
-	serverID := msg[1]
-	switch msg[0] {
+func (s *server) handleControlMessage(senderID, msgType string) {
+	switch msgType {
 	case "JOINED":
-		s.servers[serverID] = true
+		s.servers[senderID] = true
 		if s.state == leader {
-			s.lVars.nextIndex[serverID] = s.elog.lastIndex()
-			s.lVars.matchIndex[serverID] = 0
+			s.lVars.nextIndex[senderID] = s.elog.lastIndex()
+			s.lVars.matchIndex[senderID] = 0
 		}
 	case "LEFT":
-		delete(s.servers, serverID)
+		delete(s.servers, senderID)
 		if s.state == leader {
-			delete(s.lVars.nextIndex, serverID)
-			delete(s.lVars.matchIndex, serverID)
+			delete(s.lVars.nextIndex, senderID)
+			delete(s.lVars.matchIndex, senderID)
 		}
 	}
 }
 
 func (s *server) requestVote() {
+	msg := requestVoteMsg{
+		Term:         s.currentTerm,
+		LastLogIndex: s.elog.lastIndex(),
+		LastLogTerm:  s.elog.lastTerm(),
+	}
 	// bez uuid, bo przesyłany przez socket
-	s.iface.Send("RV",
-		strconv.Itoa(s.currentTerm),
-		strconv.Itoa(s.elog.lastIndex()),
-		strconv.Itoa(s.elog.lastTerm()))
+	s.iface.Send("RV", msg)
 }
 
-func (s *server) handleRequestVote(msg []string) {
-	currentTerm := strconv.Itoa(s.currentTerm)
-	term, err := strconv.Atoi(msg[2])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "handleRequestVote term conv err:", err)
-		return
+func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) {
+	response := requestVoteRespMsg{
+		Term: s.currentTerm,
 	}
-	voteGranted := false
-	if term < s.currentTerm {
-		s.iface.Send("RVR", currentTerm, strconv.FormatBool(voteGranted))
+	if msg.Term < s.currentTerm {
+		response.VoteGranted = false
+		s.iface.Send("RVR", response, candidateID)
+		fmt.Println("handleRequestVote: voteGranted == ", false, "(obsolete term)")
 		return
 	}
 
-	candidateID := msg[0]
-	lastTerm, err := strconv.Atoi(msg[4])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "handleRequestVote lastTerm conv err:", err)
-		return
-	}
-	lastIndex, err := strconv.Atoi(msg[3])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "handleRequestVote lastIndex conv err:", err)
-		return
-	}
+	voteGranted := false
 	if (s.votedFor == nil || s.votedFor.String() == candidateID) &&
-		s.elog.candidateIsUpToDate(lastTerm, lastIndex) {
+		s.elog.candidateIsUpToDate(msg.LastLogTerm, msg.LastLogIndex) {
 		voteGranted = true
 	}
-	s.iface.Send("RVR", currentTerm, strconv.FormatBool(voteGranted), candidateID)
+	response.VoteGranted = voteGranted
+	s.iface.Send("RVR", response, candidateID)
 
 	fmt.Println("XXX handleRequestVote: voteGranted ==", voteGranted)
 }
 
-func (s *server) handleRequestVoteResponse(msg []string) {
+func (s *server) handleRequestVoteResponse(voterID string, msg requestVoteRespMsg) {
 	fmt.Println("YYY handleRequestVoteResponse:", msg)
 
-	serverID := msg[0]
-	s.cVars.votesResponded[serverID] = true
-	if voteGranted, err := strconv.ParseBool(msg[3]); err == nil && voteGranted {
-		s.cVars.votesGranted[serverID] = true
+	s.cVars.votesResponded[voterID] = true
+	if msg.VoteGranted {
+		s.cVars.votesGranted[voterID] = true
 	}
 
 	n := s.getNumberOfServers()
 	if len(s.cVars.votesGranted)*2 >= n {
 		fmt.Println("candidate -> leader | term:", s.currentTerm)
-		// TODO s.state = leader
+		s.state = leader
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
+	}
+}
+
+func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
+	switch msgType {
+	case "RV":
+		var msgStruct requestVoteMsg
+		if err := json.Unmarshal(msg, &msgStruct); err != nil {
+			return nil, 0, err
+		}
+		return msgStruct, msgStruct.Term, nil
+	case "RVR":
+		var msgStruct requestVoteRespMsg
+		if err := json.Unmarshal(msg, &msgStruct); err != nil {
+			return nil, 0, err
+		}
+		return msgStruct, msgStruct.Term, nil
+	case "AE":
+		var msgStruct appendEntriesMsg
+		if err := json.Unmarshal(msg, &msgStruct); err != nil {
+			return nil, 0, err
+		}
+		return msgStruct, msgStruct.Term, nil
+	default:
+		text := fmt.Sprintf("decodeMessage mismatched msgType (%s)\n", msgType)
+		return nil, 0, errors.New(text)
 	}
 }
 
@@ -207,40 +242,47 @@ func (s *server) loop() {
 	resetElectionTimeout()
 
 	for {
-		var msgType string
-		msg, err := s.iface.Recv()
-		if err == nil {
-			fmt.Println("server", msg)
+		senderID, msgType, msgBytes, err := s.iface.Recv()
+		if err != nil && err != intface.ErrEAGAIN {
+			fmt.Fprintln(os.Stderr, "ERROR in iface.Recv:", err)
+		}
 
-			if len(msg) == 2 { // server JOINED/LEFT
-				s.handleControlMessage(msg)
-			} else {
-				msgType = msg[1]
+		var msg interface{}
 
-				// "if candidate's or leader's term is out of date,
-				// it immediately reverts to follower state"
-				if term, err := strconv.Atoi(msg[2]); err == nil {
-					if term > s.currentTerm {
-						fmt.Println(s.state, "-> follower | term:", s.currentTerm)
-						s.state = follower
-						s.currentTerm = term
-						s.votedFor = nil
-						resetElectionTimeout()
-					}
-				} else {
-					fmt.Fprintln(os.Stderr, "term conv err:", err)
-				}
+		if msgType == "JOINED" || msgType == "LEFT" {
+			s.handleControlMessage(senderID, msgType)
+		} else if msgType != "" {
+			var term int
+			msg, term, err = decodeMessage(msgType, msgBytes)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				msgType = ""
+			}
+			// "if candidate's or leader's term is out of date,
+			// it immediately reverts to follower state"
+			if term > s.currentTerm {
+				fmt.Println(s.state, "-> follower | term:", s.currentTerm)
+				s.state = follower
+				s.currentTerm = term
+				s.votedFor = nil
+				resetElectionTimeout()
+			} else if term < s.currentTerm { // drop stale responses
+				// instead of continue, so that timeouts may happen
+				msgType = ""
 			}
 		}
+
+		// fmt.Printf("server loop: [%s, %s, %v]\n", senderID, msgType, msgStruct)
 
 		switch s.state {
 		case follower:
 			if msgType == "RV" {
-				s.handleRequestVote(msg)
+				s.handleRequestVote(senderID, msg.(requestVoteMsg))
 				resetElectionTimeout()
 				continue
 			}
 			// TODO handleAppendEntries (obviously resets timeout)
+			// also in candidate (cand -> follower when discovers current leader or new term) -- new term taken care of above, discovering leader in case candidate?
 			// if msgType == "AE" {
 			// prawdopodobnie jeszcze obsluga zadania klienta (przekierowanie go)
 
@@ -252,16 +294,11 @@ func (s *server) loop() {
 			}
 
 		case candidate:
-			// TODO napisać funkcje konwersji stanów? bo votedFor trza zerować
-			// zrobione powyżej
-			// TODO if RPC request has term T > current term
-			// then update current term and convert to follower
-			// if it's requestVote RPC then vote for new candidate!
-			// even though you're also a candidate
-
 			if msgType == "RVR" {
-				s.handleRequestVoteResponse(msg)
-				// ...
+				s.handleRequestVoteResponse(senderID, msg.(requestVoteRespMsg))
+				if s.state == leader {
+					continue
+				}
 			}
 
 			if time.Now().After(timeout) {

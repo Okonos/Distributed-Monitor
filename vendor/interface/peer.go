@@ -59,9 +59,9 @@ func newPeer(agent *Agent, peerAddr string) (peer *Peer) {
 	return
 }
 
-func (peer *Peer) send(args []string) (n int, err error) {
+func (peer *Peer) send(msg [][]byte) (n int, err error) {
 	if peer.connected {
-		n, err = peer.dealer.SendMessage(args)
+		n, err = peer.dealer.SendMessage(msg)
 		if err == zmq.AsErrno(syscall.EAGAIN) {
 			fmt.Println("Unexpected err: High-water mark reached")
 			peer.disconnect()

@@ -1,8 +1,8 @@
 package main
 
 type entry struct {
-	term    int
-	command string
+	Term    int
+	Command string
 }
 
 type entryLog struct {
@@ -28,7 +28,7 @@ func (l *entryLog) lastTerm() int {
 	if len(l.entries) == 0 {
 		return 0
 	}
-	return l.entries[len(l.entries)-1].term
+	return l.entries[len(l.entries)-1].Term
 }
 
 // args: candidate's last term and index

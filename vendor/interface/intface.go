@@ -26,6 +26,9 @@ type MessagingInterface struct {
 	pipe *zmq.Socket // Pipe through to agent
 }
 
+// ErrEAGAIN used in Recv()
+var ErrEAGAIN = errors.New("resource temporarily unavailable")
+
 // New : Constructor for the interface class
 func New(uuid uuid.UUID) (iface *MessagingInterface) {
 	iface = &MessagingInterface{}
@@ -42,20 +45,38 @@ func New(uuid uuid.UUID) (iface *MessagingInterface) {
 	return
 }
 
-// Send : send a command to interface
-func (iface *MessagingInterface) Send(command string, args ...string) (int, error) {
-	sendArgs := make([]interface{}, len(args)+1)
-	sendArgs[0] = command
-	for i, v := range args {
-		sendArgs[i+1] = v
+// Send : send a message to backend; args are optional (e.g. recipient's id)
+func (iface *MessagingInterface) Send(cmd string, msg interface{}, args ...string) {
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR in iface.Send marshal:", err)
+		return
 	}
-	n, err := iface.pipe.SendMessage(sendArgs...)
-	return n, err
+	var arg string
+	if len(args) == 1 {
+		arg = args[0]
+	}
+	if _, err := iface.pipe.SendMessage(cmd, msgBytes, arg); err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR in iface.pipe.SendMessage:", err)
+	}
 }
 
 // Recv : wait for a message from the interface
-func (iface *MessagingInterface) Recv() (msg []string, err error) {
-	msg, err = iface.pipe.RecvMessage(zmq.DONTWAIT)
+func (iface *MessagingInterface) Recv() (senderID string, msgType string,
+	msgBytes []byte, err error) {
+	var msg [][]byte
+	msg, err = iface.pipe.RecvMessageBytes(zmq.DONTWAIT)
+	if err != nil {
+		if err == zmq.AsErrno(syscall.EAGAIN) {
+			err = ErrEAGAIN
+		}
+	} else {
+		senderID = string(msg[0])
+		msgType = string(msg[1])
+		if len(msg) > 2 { // exclude JOINED/LEFT control messages
+			msgBytes = msg[2]
+		}
+	}
 	return
 }
 
@@ -148,15 +169,16 @@ func newAgent(uuid uuid.UUID) *Agent {
 
 func (agent *Agent) routerLoop() {
 	for {
-		msg, err := agent.router.RecvMessage(0)
+		msg, err := agent.router.RecvMessageBytes(0)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ROUTER ERR:", err)
+			continue
 		}
 
 		// DEBUG fmt.Printf("router %T, %s, %d\n", msg, msg, len(msg))
 
-		id := msg[0]
-		header := msg[1]
+		id := string(msg[0])
+		header := string(msg[1])
 		peer, ok := agent.peers.get(id)
 
 		// Discard messages until HELLO is received
@@ -168,7 +190,7 @@ func (agent *Agent) routerLoop() {
 			fmt.Println("HELLO received from", id)
 			if !ok {
 				uuidBytes := uuid.Parse(id)
-				peerAddr := msg[2]
+				peerAddr := string(msg[2])
 				peer = agent.createPeer(uuidBytes, peerAddr)
 			}
 			peer.hello = true
@@ -177,7 +199,6 @@ func (agent *Agent) routerLoop() {
 		}
 
 		peer.isAlive()
-
 		// else send to server thread
 		agent.pipe.SendMessage(msg)
 	}
@@ -189,9 +210,9 @@ func (agent *Agent) createPeer(uuid uuid.UUID, peerAddr string) (peer *Peer) {
 	return
 }
 
-func (agent *Agent) broadcast(args []string) {
+func (agent *Agent) broadcast(msg [][]byte) {
 	for _, peer := range agent.peers.lockAndGetReference() {
-		if _, err := peer.send(args); err != nil {
+		if _, err := peer.send(msg); err != nil {
 			panic(err)
 		}
 	}
@@ -201,33 +222,26 @@ func (agent *Agent) broadcast(args []string) {
 // Handle different control messages from the front-end
 func (agent *Agent) controlMessage() (err error) {
 	// Get the whole message off the pipe in one go
-	msg, e := agent.pipe.RecvMessage(0)
+	// [type, msg struct, optional args (currently recipient ID only)]
+	msg, e := agent.pipe.RecvMessageBytes(0)
 	if e != nil {
 		return e
 	}
-	command := msg[0]
 
-	fmt.Println("DDD controlMessage:", msg)
+	command := string(msg[0])
 
 	switch command {
 	case "RV": // Request Vote RPC
 		agent.broadcast(msg)
-	// case "BROADCAST":
-	// 	// data, err := agent.pipe.RecvBytes(0)
-	// 	data := msg[1]
-	// 	for _, peer := range agent.peers {
-	// 		fmt.Println("Sending broadcast")
-	// 		peer.send(data)
-	// 	}
-	case "RVR": // Request Vote Response
-		peerID := msg[3]
+
+	case "RVR", "AE": // Request Vote Response, Append Entries
+		peerID := string(msg[2])
 		peer, ok := agent.peers.get(peerID)
 		if !ok {
 			text := fmt.Sprintf("RVR err: peer (%s) not found\n", peerID)
 			return errors.New(text)
 		}
-		peer.send(msg[:3])
-	default:
+		peer.send(msg[:2])
 	}
 
 	return
@@ -253,7 +267,7 @@ func (agent *Agent) handleBeacon() (err error) {
 			fmt.Println("BEACON:", peerAddr)
 			peer = agent.createPeer(uuid, peerAddr)
 			// Report peer joined the network
-			agent.pipe.SendMessage("JOINED", uuid)
+			agent.pipe.SendMessage(uuid, "JOINED")
 		}
 		// Any activity from the peer means it's alive
 		peer.isAlive()
@@ -316,7 +330,7 @@ func (iface *MessagingInterface) agent(uuid uuid.UUID) {
 		for id, peer := range peers {
 			if time.Now().After(peer.expiresAt) {
 				// Report peer left the network
-				agent.pipe.SendMessage("LEFT", id)
+				agent.pipe.SendMessage(id, "LEFT")
 				delete(peers, id)
 			}
 		}
