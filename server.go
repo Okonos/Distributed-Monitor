@@ -210,7 +210,7 @@ func (s *server) handleRequestVoteResponse(voterID string,
 	}
 
 	n := s.getNumberOfServers()
-	if len(s.cVars.votesGranted)*2 >= n {
+	if s.state == candidate && len(s.cVars.votesGranted)*2 >= n {
 		fmt.Println("candidate -> leader | term:", s.currentTerm)
 		s.state = leader
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
@@ -260,23 +260,22 @@ func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 	switch msgType {
 	case "RV":
 		var msgStruct requestVoteMsg
-		if err := json.Unmarshal(msg, &msgStruct); err != nil {
-			return nil, 0, err
-		}
-		return msgStruct, msgStruct.Term, nil
+		err := json.Unmarshal(msg, &msgStruct)
+		return msgStruct, msgStruct.Term, err
 	case "RVR":
 		var msgStruct requestVoteResponse
-		if err := json.Unmarshal(msg, &msgStruct); err != nil {
-			return nil, 0, err
-		}
-		return msgStruct, msgStruct.Term, nil
+		err := json.Unmarshal(msg, &msgStruct)
+		return msgStruct, msgStruct.Term, err
 	case "AE":
 		var msgStruct appendEntriesMsg
-		if err := json.Unmarshal(msg, &msgStruct); err != nil {
-			return nil, 0, err
-		}
+		err := json.Unmarshal(msg, &msgStruct)
 		fmt.Println("AppendEntries heartbeat received |", msgStruct.Term)
-		return msgStruct, msgStruct.Term, nil
+		return msgStruct, msgStruct.Term, err
+	case "AER":
+		var msgStruct appendEntriesResponse
+		err := json.Unmarshal(msg, &msgStruct)
+		fmt.Println("AER")
+		return msgStruct, msgStruct.Term, err
 	default:
 		text := fmt.Sprintf("decodeMessage mismatched msgType (%s)\n", msgType)
 		return nil, 0, errors.New(text)
