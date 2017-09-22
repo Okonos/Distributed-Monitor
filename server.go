@@ -301,54 +301,68 @@ func (s *server) loop() {
 		senderID, msgType, msgBytes, err := s.iface.Recv()
 		if err != nil && err != intface.ErrEAGAIN {
 			fmt.Fprintln(os.Stderr, "ERROR in iface.Recv:", err)
-		}
-
-		var msg interface{}
-		var dropped bool // term was obsolete and message was dropped
-
-		if msgType == "JOINED" || msgType == "LEFT" {
-			s.handleControlMessage(senderID, msgType)
-		} else if msgType != "" {
-			var term int
-			msg, term, err = decodeMessage(msgType, msgBytes)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				msgType = ""
-			}
-			// "if candidate's or leader's term is out of date,
-			// it immediately reverts to follower state"
-			if term > s.currentTerm {
-				fmt.Println(s.state, "-> follower | term:", s.currentTerm)
-				s.state = follower
-				s.currentTerm = term
-				s.votedFor = nil
-				resetElectionTimeout()
-			} else if (msgType == "RVR" || msgType == "AER") &&
-				term < s.currentTerm { // drop stale responses
-				msgType = "" // instead of continue, so that timeouts may happen
-				dropped = true
-			}
+			continue
 		}
 
 		// fmt.Printf("server loop: [%s, %s, %v]\n", senderID, msgType, msgStruct)
 
+		if err == nil { // Message was received
+			switch msgType {
+			case "JOINED", "LEFT":
+				s.handleControlMessage(senderID, msgType)
+			default:
+				message, term, err := decodeMessage(msgType, msgBytes)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					break
+				}
+				// "if candidate's or leader's term is out of date,
+				// it immediately reverts to follower state"
+				if term > s.currentTerm {
+					fmt.Println(s.state, "-> follower | term:", s.currentTerm)
+					s.state = follower
+					s.currentTerm = term
+					s.votedFor = nil
+					resetElectionTimeout()
+				}
+
+				var dropped bool // term was obsolete and message was dropped
+				// TODO client redirect
+				switch msg := message.(type) {
+				case requestVoteMsg:
+					dropped = s.handleRequestVote(senderID, msg)
+
+				case requestVoteResponse:
+					if term < s.currentTerm { // drop stale responses
+						dropped = true
+						break
+					}
+					s.handleRequestVoteResponse(senderID, msg)
+
+				case appendEntriesMsg:
+					dropped = s.handleAppendEntries(senderID, msg)
+					if !dropped && s.state == candidate {
+						s.state = follower
+					}
+
+				case appendEntriesResponse:
+					if term < s.currentTerm { // drop stale responses
+						dropped = true
+						break
+					}
+					// s.handleAppendEntriesResponse
+				}
+
+				// reset the timeout only if message was not dropped
+				// XXX client request should not reset the timeout
+				if !dropped {
+					resetElectionTimeout()
+				}
+			}
+		}
+
 		switch s.state {
 		case follower:
-			if msgType == "RV" {
-				dropped = s.handleRequestVote(senderID, msg.(requestVoteMsg))
-			}
-			if msgType == "AE" {
-				dropped = s.handleAppendEntries(senderID, msg.(appendEntriesMsg))
-			}
-			// reset the timeout only if message was not dropped
-			if msgType != "" && !dropped {
-				resetElectionTimeout()
-				continue
-			}
-			// TODO handleAppendEntries (obviously resets timeout)
-			// also in candidate (cand -> follower when discovers current leader or new term) -- new term taken care of above, discovering leader in case candidate?
-			// prawdopodobnie jeszcze obsluga zadania klienta (przekierowanie go)
-
 			// check election timeout
 			if time.Now().After(timeout) {
 				fmt.Println("follower -> candidate | term:", s.currentTerm)
@@ -357,13 +371,6 @@ func (s *server) loop() {
 			}
 
 		case candidate:
-			if msgType == "RVR" {
-				s.handleRequestVoteResponse(senderID, msg.(requestVoteResponse))
-				if s.state == leader {
-					continue
-				}
-			}
-
 			if time.Now().After(timeout) {
 				s.currentTerm++
 				// vote for self
