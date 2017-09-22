@@ -40,7 +40,7 @@ type requestVoteMsg struct {
 	LastLogTerm  int
 }
 
-type requestVoteRespMsg struct {
+type requestVoteResponse struct {
 	Term        int
 	VoteGranted bool
 }
@@ -51,6 +51,11 @@ type appendEntriesMsg struct {
 	PrevLogTerm  int
 	Entries      []entry // log entries to store (empty for heartbeat)
 	LeaderCommit int     // leader's commitIndex
+}
+
+type appendEntriesResponse struct {
+	Term    int
+	success bool // true if follower contained entry matching prevLog{Index, Term}
 }
 
 type candidateVars struct {
@@ -77,12 +82,14 @@ func (cv *candidateVars) reset() {
 type leaderVars struct {
 	nextIndex  map[string]int
 	matchIndex map[string]int
+	hbTimeout  time.Time // heartbeat timeout
 }
 
 func newLeaderVars() *leaderVars {
 	return &leaderVars{
 		nextIndex:  make(map[string]int),
 		matchIndex: make(map[string]int),
+		hbTimeout:  time.Now(),
 	}
 }
 
@@ -92,6 +99,12 @@ func (lv *leaderVars) reset(servers []string, lastLogIndex int) {
 		lv.nextIndex[id] = lastLogIndex + 1
 		lv.matchIndex[id] = -1
 	}
+	lv.hbTimeout = time.Now()
+}
+
+func (lv *leaderVars) setTimeout() {
+	const heartbeatTimeoutLen = 200 * time.Millisecond
+	lv.hbTimeout = time.Now().Add(heartbeatTimeoutLen)
 }
 
 type server struct {
@@ -163,15 +176,15 @@ func (s *server) requestVote() {
 	s.iface.Send("RV", msg)
 }
 
-func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) {
-	response := requestVoteRespMsg{
+func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) bool {
+	response := requestVoteResponse{
 		Term: s.currentTerm,
 	}
 	if msg.Term < s.currentTerm {
 		response.VoteGranted = false
 		s.iface.Send("RVR", response, candidateID)
 		fmt.Println("handleRequestVote: voteGranted == ", false, "(obsolete term)")
-		return
+		return true // message dropped, no timeout reset
 	}
 
 	voteGranted := false
@@ -183,9 +196,12 @@ func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) {
 	s.iface.Send("RVR", response, candidateID)
 
 	fmt.Println("XXX handleRequestVote: voteGranted ==", voteGranted)
+
+	return false
 }
 
-func (s *server) handleRequestVoteResponse(voterID string, msg requestVoteRespMsg) {
+func (s *server) handleRequestVoteResponse(voterID string,
+	msg requestVoteResponse) {
 	fmt.Println("YYY handleRequestVoteResponse:", msg)
 
 	s.cVars.votesResponded[voterID] = true
@@ -201,6 +217,45 @@ func (s *server) handleRequestVoteResponse(voterID string, msg requestVoteRespMs
 	}
 }
 
+func (s *server) appendEntries(heartbeat bool) {
+	if heartbeat { // send appendEntries with empty entries[]
+		msg := appendEntriesMsg{
+			Term:         s.currentTerm,
+			Entries:      nil,
+			LeaderCommit: s.elog.commitIndex,
+		}
+		for serverID, index := range s.lVars.nextIndex {
+			prevLogIndex := index - 1
+			prevLogTerm := 0
+			if prevLogIndex >= 0 {
+				prevLogTerm = s.elog.entries[prevLogIndex].Term
+			}
+			msg.PrevLogIndex = prevLogIndex
+			msg.PrevLogTerm = prevLogTerm
+			s.iface.Send("AE", msg, serverID)
+		}
+	}
+	// TODO reszta
+	// s.iface.Send("AE",
+}
+
+func (s *server) handleAppendEntries(leaderID string, msg appendEntriesMsg) bool {
+	response := appendEntriesResponse{Term: s.currentTerm}
+	if msg.Term < s.currentTerm {
+		response.success = false
+		s.iface.Send("AER", response, leaderID)
+		return true // message dropped, no timeout reset
+	}
+	if msg.Entries == nil {
+		response.success = true
+		s.iface.Send("AER", response, leaderID)
+	} else {
+		fmt.Println("NOT NIL")
+	}
+
+	return false
+}
+
 func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 	switch msgType {
 	case "RV":
@@ -210,7 +265,7 @@ func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 		}
 		return msgStruct, msgStruct.Term, nil
 	case "RVR":
-		var msgStruct requestVoteRespMsg
+		var msgStruct requestVoteResponse
 		if err := json.Unmarshal(msg, &msgStruct); err != nil {
 			return nil, 0, err
 		}
@@ -220,6 +275,7 @@ func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 		if err := json.Unmarshal(msg, &msgStruct); err != nil {
 			return nil, 0, err
 		}
+		fmt.Println("AppendEntries heartbeat received |", msgStruct.Term)
 		return msgStruct, msgStruct.Term, nil
 	default:
 		text := fmt.Sprintf("decodeMessage mismatched msgType (%s)\n", msgType)
@@ -249,6 +305,7 @@ func (s *server) loop() {
 		}
 
 		var msg interface{}
+		var dropped bool // term was obsolete and message was dropped
 
 		if msgType == "JOINED" || msgType == "LEFT" {
 			s.handleControlMessage(senderID, msgType)
@@ -267,9 +324,10 @@ func (s *server) loop() {
 				s.currentTerm = term
 				s.votedFor = nil
 				resetElectionTimeout()
-			} else if term < s.currentTerm { // drop stale responses
-				// instead of continue, so that timeouts may happen
-				msgType = ""
+			} else if (msgType == "RVR" || msgType == "AER") &&
+				term < s.currentTerm { // drop stale responses
+				msgType = "" // instead of continue, so that timeouts may happen
+				dropped = true
 			}
 		}
 
@@ -278,13 +336,18 @@ func (s *server) loop() {
 		switch s.state {
 		case follower:
 			if msgType == "RV" {
-				s.handleRequestVote(senderID, msg.(requestVoteMsg))
+				dropped = s.handleRequestVote(senderID, msg.(requestVoteMsg))
+			}
+			if msgType == "AE" {
+				dropped = s.handleAppendEntries(senderID, msg.(appendEntriesMsg))
+			}
+			// reset the timeout only if message was not dropped
+			if msgType != "" && !dropped {
 				resetElectionTimeout()
 				continue
 			}
 			// TODO handleAppendEntries (obviously resets timeout)
 			// also in candidate (cand -> follower when discovers current leader or new term) -- new term taken care of above, discovering leader in case candidate?
-			// if msgType == "AE" {
 			// prawdopodobnie jeszcze obsluga zadania klienta (przekierowanie go)
 
 			// check election timeout
@@ -296,7 +359,7 @@ func (s *server) loop() {
 
 		case candidate:
 			if msgType == "RVR" {
-				s.handleRequestVoteResponse(senderID, msg.(requestVoteRespMsg))
+				s.handleRequestVoteResponse(senderID, msg.(requestVoteResponse))
 				if s.state == leader {
 					continue
 				}
@@ -312,6 +375,10 @@ func (s *server) loop() {
 			}
 
 		case leader:
+			if time.Now().After(s.lVars.hbTimeout) {
+				s.appendEntries(true) // heartbeat
+				s.lVars.setTimeout()
+			}
 		}
 	}
 }
