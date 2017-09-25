@@ -173,8 +173,9 @@ func (s *server) requestVote() {
 		LastLogIndex: s.elog.lastIndex(),
 		LastLogTerm:  s.elog.lastTerm(),
 	}
-	// bez uuid, bo przesyłany przez socket
-	s.iface.Send("RV", msg)
+	for serverID := range s.servers {
+		s.iface.Send("RV", msg, serverID)
+	}
 }
 
 func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) bool {

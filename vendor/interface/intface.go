@@ -222,28 +222,19 @@ func (agent *Agent) broadcast(msg [][]byte) {
 // Handle different control messages from the front-end
 func (agent *Agent) controlMessage() (err error) {
 	// Get the whole message off the pipe in one go
-	// [type, msg struct, optional args (currently recipient ID only)]
+	// [type, msg struct, recipient ID]
 	msg, e := agent.pipe.RecvMessageBytes(0)
 	if e != nil {
 		return e
 	}
 
-	command := string(msg[0])
-
-	switch command {
-	case "RV": // Request Vote RPC
-		agent.broadcast(msg)
-
-	// Request Vote Response, Append Entries (Request and Response)
-	case "RVR", "AE", "AER":
-		peerID := string(msg[2])
-		peer, ok := agent.peers.get(peerID)
-		if !ok {
-			text := fmt.Sprintf("RVR err: peer (%s) not found\n", peerID)
-			return errors.New(text)
-		}
-		peer.send(msg[:2])
+	peerID := string(msg[2])
+	peer, ok := agent.peers.get(peerID)
+	if !ok {
+		text := fmt.Sprintf("RVR err: peer (%s) not found\n", peerID)
+		return errors.New(text)
 	}
+	peer.send(msg[:2])
 
 	return
 }
