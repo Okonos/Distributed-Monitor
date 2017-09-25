@@ -234,7 +234,8 @@ func (agent *Agent) controlMessage() (err error) {
 	case "RV": // Request Vote RPC
 		agent.broadcast(msg)
 
-	case "RVR", "AE": // Request Vote Response, Append Entries
+	// Request Vote Response, Append Entries (Request and Response)
+	case "RVR", "AE", "AER":
 		peerID := string(msg[2])
 		peer, ok := agent.peers.get(peerID)
 		if !ok {

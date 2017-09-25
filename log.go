@@ -8,6 +8,7 @@ type entry struct {
 type entryLog struct {
 	entries     []entry
 	commitIndex int // the index of the latest entry the state machine may apply
+	// TODO lastApplied?
 }
 
 func newLog() *entryLog {
@@ -15,6 +16,10 @@ func newLog() *entryLog {
 		entries:     make([]entry, 0),
 		commitIndex: -1,
 	}
+}
+
+func (l *entryLog) append(term int, command string) {
+	l.entries = append(l.entries, entry{term, command})
 }
 
 // XXX in paper first index is 1!

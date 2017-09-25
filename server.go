@@ -54,8 +54,9 @@ type appendEntriesMsg struct {
 }
 
 type appendEntriesResponse struct {
-	Term    int
-	success bool // true if follower contained entry matching prevLog{Index, Term}
+	Term       int
+	Success    bool // true if follower had entry matching prevLog{Index, Term}
+	MatchIndex int
 }
 
 type candidateVars struct {
@@ -103,7 +104,7 @@ func (lv *leaderVars) reset(servers []string, lastLogIndex int) {
 }
 
 func (lv *leaderVars) setTimeout() {
-	const heartbeatTimeoutLen = 200 * time.Millisecond
+	const heartbeatTimeoutLen = 150 * time.Millisecond
 	lv.hbTimeout = time.Now().Add(heartbeatTimeoutLen)
 }
 
@@ -144,9 +145,9 @@ func (s *server) getServersIDs() []string {
 	return ids
 }
 
-func (s *server) getNumberOfServers() int {
-	// this one + all the others that this one knows of
-	return len(s.servers) + 1
+func (s *server) isQuorum(n int) bool {
+	// +1 to include this server
+	return 2*n > len(s.servers)+1
 }
 
 func (s *server) handleControlMessage(senderID, msgType string) {
@@ -209,8 +210,7 @@ func (s *server) handleRequestVoteResponse(voterID string,
 		s.cVars.votesGranted[voterID] = true
 	}
 
-	n := s.getNumberOfServers()
-	if s.state == candidate && len(s.cVars.votesGranted)*2 >= n {
+	if s.state == candidate && s.isQuorum(len(s.cVars.votesGranted)) {
 		fmt.Println("candidate -> leader | term:", s.currentTerm)
 		s.state = leader
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
@@ -219,41 +219,117 @@ func (s *server) handleRequestVoteResponse(voterID string,
 
 func (s *server) appendEntries(heartbeat bool) {
 	if heartbeat { // send appendEntries with empty entries[]
-		msg := appendEntriesMsg{
-			Term:         s.currentTerm,
-			Entries:      nil,
-			LeaderCommit: s.elog.commitIndex,
-		}
-		for serverID, index := range s.lVars.nextIndex {
-			prevLogIndex := index - 1
+		for serverID, nextIndex := range s.lVars.nextIndex {
+			prevLogIndex := nextIndex - 1
 			prevLogTerm := 0
 			if prevLogIndex >= 0 {
 				prevLogTerm = s.elog.entries[prevLogIndex].Term
 			}
-			msg.PrevLogIndex = prevLogIndex
-			msg.PrevLogTerm = prevLogTerm
+			// up to 1 entry
+			var lastEntry int // = min(len(log), index+1)
+			if len(s.elog.entries) < nextIndex+1 {
+				lastEntry = len(s.elog.entries)
+			} else {
+				lastEntry = nextIndex + 1
+			}
+			// XXX nextIndex a len
+			entries := s.elog.entries[nextIndex:lastEntry]
+
+			msg := appendEntriesMsg{
+				Term:         s.currentTerm,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      entries,
+				LeaderCommit: s.elog.commitIndex,
+			}
 			s.iface.Send("AE", msg, serverID)
 		}
 	}
-	// TODO reszta
-	// s.iface.Send("AE",
 }
 
 func (s *server) handleAppendEntries(leaderID string, msg appendEntriesMsg) bool {
-	response := appendEntriesResponse{Term: s.currentTerm}
-	if msg.Term < s.currentTerm {
-		response.success = false
+	logOk := msg.PrevLogIndex == -1 ||
+		(msg.PrevLogIndex >= 0 &&
+			msg.PrevLogIndex < len(s.elog.entries) &&
+			msg.PrevLogTerm == s.elog.entries[msg.PrevLogIndex].Term)
+
+	response := appendEntriesResponse{
+		Term:       s.currentTerm,
+		Success:    false,
+		MatchIndex: -1}
+
+	// reject request
+	if msg.Term < s.currentTerm ||
+		(msg.Term == s.currentTerm && s.state == follower && !logOk) {
 		s.iface.Send("AER", response, leaderID)
 		return true // message dropped, no timeout reset
 	}
-	if msg.Entries == nil {
-		response.success = true
-		s.iface.Send("AER", response, leaderID)
-	} else {
-		fmt.Println("NOT NIL")
+
+	// return to follower state
+	if msg.Term == s.currentTerm {
+		if s.state == candidate {
+			s.state = follower
+			return false
+		}
+		if s.state == follower && logOk {
+			index := msg.PrevLogIndex + 1
+			if len(msg.Entries) == 0 || (len(s.elog.entries)-1 >= index &&
+				s.elog.entries[index].Term == msg.Entries[0].Term) {
+
+				s.elog.commitIndex = msg.LeaderCommit
+				response.Success = true
+				response.MatchIndex = msg.PrevLogIndex + len(msg.Entries)
+				s.iface.Send("AER", response, leaderID)
+			} else if len(msg.Entries) != 0 {
+				if len(s.elog.entries)-1 >= index &&
+					s.elog.entries[index].Term != msg.Entries[0].Term {
+					// conflict: remove 1 entry
+					s.elog.entries = s.elog.entries[:len(s.elog.entries)-1]
+				} else if len(s.elog.entries)-1 == msg.PrevLogIndex {
+					// no conflict: append entry
+					s.elog.entries = append(s.elog.entries, msg.Entries[0])
+				}
+			}
+		}
 	}
 
 	return false
+}
+
+func (s *server) handleAppendEntriesResponse(followerID string,
+	msg appendEntriesResponse) {
+	nextIndex := s.lVars.nextIndex
+	if msg.Success {
+		nextIndex[followerID] = msg.MatchIndex + 1
+		s.lVars.matchIndex[followerID] = msg.MatchIndex
+	} else {
+		nextIndex[followerID]--
+		if nextIndex[followerID] < 0 {
+			nextIndex[followerID] = 0
+		}
+	}
+}
+
+func (s *server) advanceCommitIndex() {
+	agreeing := 1 // since only leader advances the commitIndex and it uses his log
+	maxAgreeIndex := -1
+	for index := 0; index < len(s.elog.entries); index++ {
+		for serverID := range s.servers {
+			if s.lVars.matchIndex[serverID] >= index {
+				agreeing++
+			}
+			if s.isQuorum(agreeing) && index > maxAgreeIndex {
+				maxAgreeIndex = index
+			}
+		}
+	}
+	if maxAgreeIndex != -1 && s.elog.entries[maxAgreeIndex].Term == s.currentTerm {
+		if s.elog.commitIndex != maxAgreeIndex {
+			fmt.Println("CommitIndex advanced from",
+				s.elog.commitIndex, "to", maxAgreeIndex)
+		}
+		s.elog.commitIndex = maxAgreeIndex
+	}
 }
 
 func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
@@ -269,12 +345,13 @@ func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 	case "AE":
 		var msgStruct appendEntriesMsg
 		err := json.Unmarshal(msg, &msgStruct)
-		fmt.Println("AppendEntries heartbeat received |", msgStruct.Term)
+		// fmt.Println("AppendEntries received |", msgStruct.Term)
+		fmt.Println(msgStruct)
 		return msgStruct, msgStruct.Term, err
 	case "AER":
 		var msgStruct appendEntriesResponse
 		err := json.Unmarshal(msg, &msgStruct)
-		fmt.Println("AER")
+		fmt.Println("AER", msgStruct)
 		return msgStruct, msgStruct.Term, err
 	default:
 		text := fmt.Sprintf("decodeMessage mismatched msgType (%s)\n", msgType)
@@ -296,6 +373,9 @@ func (s *server) loop() {
 		timeout = time.Now().Add(time.Duration(timeoutValue) * time.Millisecond)
 	}
 	resetElectionTimeout()
+
+	// TODO remove
+	nTimeoutsPassed := 0
 
 	for {
 		senderID, msgType, msgBytes, err := s.iface.Recv()
@@ -341,16 +421,14 @@ func (s *server) loop() {
 
 				case appendEntriesMsg:
 					dropped = s.handleAppendEntries(senderID, msg)
-					if !dropped && s.state == candidate {
-						s.state = follower
-					}
 
 				case appendEntriesResponse:
 					if term < s.currentTerm { // drop stale responses
 						dropped = true
 						break
 					}
-					// s.handleAppendEntriesResponse
+					s.handleAppendEntriesResponse(senderID, msg)
+					s.advanceCommitIndex() // TODO tylko tu?
 				}
 
 				// reset the timeout only if message was not dropped
@@ -358,6 +436,8 @@ func (s *server) loop() {
 				if !dropped {
 					resetElectionTimeout()
 				}
+
+				fmt.Println("LOG:", s.elog.entries, "nextIndex:", s.lVars.nextIndex)
 			}
 		}
 
@@ -384,6 +464,13 @@ func (s *server) loop() {
 			if time.Now().After(s.lVars.hbTimeout) {
 				s.appendEntries(true) // heartbeat
 				s.lVars.setTimeout()
+				// TODO remove
+				nTimeoutsPassed++
+				if nTimeoutsPassed > 10 {
+					s.elog.append(s.currentTerm, "GET")
+					fmt.Println("LOG:", s.elog.entries)
+					nTimeoutsPassed = 0
+				}
 			}
 		}
 	}
