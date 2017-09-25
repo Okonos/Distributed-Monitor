@@ -13,7 +13,7 @@ type entryLog struct {
 func newLog() *entryLog {
 	return &entryLog{
 		entries:     make([]entry, 0),
-		commitIndex: 0,
+		commitIndex: -1,
 	}
 }
 

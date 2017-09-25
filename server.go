@@ -154,8 +154,8 @@ func (s *server) handleControlMessage(senderID, msgType string) {
 	case "JOINED":
 		s.servers[senderID] = true
 		if s.state == leader {
-			s.lVars.nextIndex[senderID] = s.elog.lastIndex()
-			s.lVars.matchIndex[senderID] = 0
+			s.lVars.nextIndex[senderID] = s.elog.lastIndex() + 1
+			s.lVars.matchIndex[senderID] = -1
 		}
 	case "LEFT":
 		delete(s.servers, senderID)
