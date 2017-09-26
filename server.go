@@ -104,7 +104,7 @@ func (lv *leaderVars) reset(servers []string, lastLogIndex int) {
 }
 
 func (lv *leaderVars) setTimeout() {
-	const heartbeatTimeoutLen = 150 * time.Millisecond
+	const heartbeatTimeoutLen = 200 * time.Millisecond
 	lv.hbTimeout = time.Now().Add(heartbeatTimeoutLen)
 }
 
@@ -264,7 +264,8 @@ func (s *server) handleAppendEntries(leaderID string, msg appendEntriesMsg) bool
 	if msg.Term < s.currentTerm ||
 		(msg.Term == s.currentTerm && s.state == follower && !logOk) {
 		s.iface.Send("AER", response, leaderID)
-		return true // message dropped, no timeout reset
+		// message dropped (only if term is stale), no timeout reset
+		return msg.Term < s.currentTerm
 	}
 
 	// return to follower state
@@ -439,7 +440,7 @@ func (s *server) loop() {
 					resetElectionTimeout()
 				}
 
-				fmt.Println("LOG:", s.elog.entries, "nextIndex:", s.lVars.nextIndex)
+				fmt.Println("LOG:", s.elog.entries)
 			}
 		}
 
