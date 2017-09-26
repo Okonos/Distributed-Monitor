@@ -113,7 +113,7 @@ type server struct {
 	iface       *intface.MessagingInterface
 	elog        *entryLog
 	currentTerm int
-	votedFor    uuid.UUID // the candidate the server voted for in the current term
+	votedFor    string // the candidate the server voted for in the current term
 	state       serverState
 	servers     map[string]bool // set of other servers (len has to be incremented)
 	cVars       *candidateVars
@@ -127,7 +127,7 @@ func newServer() *server {
 		iface:       intface.New(uuid),
 		elog:        newLog(),
 		currentTerm: 0,
-		votedFor:    nil,
+		votedFor:    "",
 		state:       follower,
 		servers:     make(map[string]bool),
 		cVars:       newCandidateVars(),
@@ -190,9 +190,10 @@ func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) bool 
 	}
 
 	voteGranted := false
-	if (s.votedFor == nil || s.votedFor.String() == candidateID) &&
+	if (s.votedFor == "" || s.votedFor == candidateID) &&
 		s.elog.candidateIsUpToDate(msg.LastLogTerm, msg.LastLogIndex) {
 		voteGranted = true
+		s.votedFor = candidateID
 	}
 	response.VoteGranted = voteGranted
 	s.iface.Send("RVR", response, candidateID)
@@ -403,7 +404,7 @@ func (s *server) loop() {
 					fmt.Println(s.state, "-> follower | term:", s.currentTerm)
 					s.state = follower
 					s.currentTerm = term
-					s.votedFor = nil
+					s.votedFor = ""
 					resetElectionTimeout()
 				}
 
@@ -455,7 +456,7 @@ func (s *server) loop() {
 			if time.Now().After(timeout) {
 				s.currentTerm++
 				// vote for self
-				s.votedFor = s.uuid
+				s.votedFor = s.uuid.String()
 				resetElectionTimeout()
 				// send requestVote RPC
 				s.requestVote()
