@@ -210,15 +210,6 @@ func (agent *Agent) createPeer(uuid uuid.UUID, peerAddr string) (peer *Peer) {
 	return
 }
 
-func (agent *Agent) broadcast(msg [][]byte) {
-	for _, peer := range agent.peers.lockAndGetReference() {
-		if _, err := peer.send(msg); err != nil {
-			panic(err)
-		}
-	}
-	agent.peers.unlock()
-}
-
 // Handle different control messages from the front-end
 func (agent *Agent) controlMessage() (err error) {
 	// Get the whole message off the pipe in one go
