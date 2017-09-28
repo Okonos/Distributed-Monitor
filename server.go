@@ -279,7 +279,13 @@ func (s *server) handleAppendEntries(leaderID string, msg appendEntriesMsg) bool
 			if len(msg.Entries) == 0 || (len(s.elog.entries)-1 >= index &&
 				s.elog.entries[index].Term == msg.Entries[0].Term) {
 
-				s.elog.commitIndex = msg.LeaderCommit
+				// min(msg.LeaderCommit, index of last new entry)
+				lastIndex := len(s.elog.entries) - 1
+				if msg.LeaderCommit < lastIndex {
+					s.elog.commitIndex = msg.LeaderCommit
+				} else {
+					s.elog.commitIndex = lastIndex
+				}
 				response.Success = true
 				response.MatchIndex = msg.PrevLogIndex + len(msg.Entries)
 				s.iface.Send("AER", response, leaderID)
