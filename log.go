@@ -1,25 +1,33 @@
 package main
 
+import "fmt"
+
 type entry struct {
-	Term    int
-	Command string
+	Term      int
+	Requester string
+	Request   clientRequest
+}
+
+func (e entry) String() string {
+	return fmt.Sprintf("{%d %s %s}", e.Term, e.Requester[:8], e.Request)
 }
 
 type entryLog struct {
-	entries     []entry
-	commitIndex int // the index of the latest entry the state machine may apply
-	// TODO lastApplied?
+	entries      []entry
+	commitIndex  int // index of the latest entry the state machine may apply
+	lastApplied  int // index of highest log entry applied to state machine
+	itemCount    int
+	stateMachine []int
 }
 
 func newLog() *entryLog {
 	return &entryLog{
-		entries:     make([]entry, 0),
-		commitIndex: -1,
+		entries:      make([]entry, 0),
+		commitIndex:  -1,
+		lastApplied:  -1,
+		itemCount:    0,
+		stateMachine: make([]int, 0),
 	}
-}
-
-func (l *entryLog) append(term int, command string) {
-	l.entries = append(l.entries, entry{term, command})
 }
 
 // XXX in paper first index is 1!
@@ -44,4 +52,42 @@ func (l *entryLog) candidateIsUpToDate(term, index int) bool {
 		return index+1 >= logLen
 	}
 	return term > logTerm
+}
+
+// run when becoming leader
+func (l *entryLog) calculateItemCount() {
+	l.itemCount = 0
+	for _, e := range l.entries {
+		switch e.Request.Command {
+		case "GET":
+			l.itemCount--
+		case "PUT":
+			l.itemCount++
+		}
+	}
+}
+
+func (l *entryLog) append(term int, requester string, request clientRequest) {
+	l.entries = append(l.entries, entry{term, requester, request})
+}
+
+func (l *entryLog) applyEntry() (clientID string, response clientResponse) {
+	if l.commitIndex > l.lastApplied {
+		l.lastApplied++
+		request := l.entries[l.lastApplied].Request
+		clientID = l.entries[l.lastApplied].Requester
+		response.Text = request.Command
+
+		switch request.Command {
+		case "GET":
+			last := len(l.stateMachine) - 1
+			response.Value, l.stateMachine =
+				l.stateMachine[last], l.stateMachine[:last]
+		case "PUT":
+			l.stateMachine = append(l.stateMachine, request.Argument)
+		}
+		fmt.Println("STATE", l.stateMachine)
+	}
+
+	return
 }

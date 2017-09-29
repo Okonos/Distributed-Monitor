@@ -23,7 +23,8 @@ import (
 // MessagingInterface : an excuse to start the background thread
 // also a wrapper around send and recv
 type MessagingInterface struct {
-	pipe *zmq.Socket // Pipe through to agent
+	pipe       *zmq.Socket // Pipe through to agent
+	routerPipe *zmq.Socket // Pipe to router
 }
 
 // ErrEAGAIN used in Recv()
@@ -40,23 +41,34 @@ func New(uuid uuid.UUID) (iface *MessagingInterface) {
 	if err = iface.pipe.Bind("inproc://iface"); err != nil {
 		panic(err)
 	}
+	iface.routerPipe, err = zmq.NewSocket(zmq.PAIR)
+	if err != nil {
+		panic(err)
+	}
+	if err = iface.routerPipe.Bind("inproc://router"); err != nil {
+		panic(err)
+	}
 	go iface.agent(uuid)
 	time.Sleep(100 * time.Millisecond)
 	return
 }
 
 // Send : send a message to backend; args are optional (e.g. recipient's id)
-func (iface *MessagingInterface) Send(cmd string, msg interface{}, args ...string) {
+func (iface *MessagingInterface) Send(cmd string, msg interface{}, rcvrID string) {
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR in iface.Send marshal:", err)
 		return
 	}
-	var arg string
-	if len(args) == 1 {
-		arg = args[0]
+
+	var pipe *zmq.Socket
+	if cmd == "CREP" {
+		pipe = iface.routerPipe
+	} else {
+		pipe = iface.pipe
 	}
-	if _, err := iface.pipe.SendMessage(cmd, msgBytes, arg); err != nil {
+
+	if _, err := pipe.SendMessage(rcvrID, cmd, msgBytes); err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR in iface.pipe.SendMessage:", err)
 	}
 }
@@ -168,39 +180,77 @@ func newAgent(uuid uuid.UUID) *Agent {
 }
 
 func (agent *Agent) routerLoop() {
+	pipe, err := zmq.NewSocket(zmq.PAIR)
+	if err != nil {
+		panic(err)
+	}
+	if err := pipe.Connect("inproc://router"); err != nil {
+		panic(err)
+	}
+	poller := zmq.NewPoller()
+	poller.Add(agent.router, zmq.POLLIN)
+	poller.Add(pipe, zmq.POLLIN)
+
 	for {
-		msg, err := agent.router.RecvMessageBytes(0)
+		sockets, err := poller.Poll(-1)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "ROUTER ERR:", err)
-			continue
+			log.Println("Router poll error", err)
+			panic(err)
 		}
 
-		// DEBUG fmt.Printf("router %T, %s, %d\n", msg, msg, len(msg))
+		var msg [][]byte
+		for _, socket := range sockets {
+			switch s := socket.Socket; s {
+			case agent.router:
+				msg, err = agent.router.RecvMessageBytes(0)
 
-		id := string(msg[0])
-		header := string(msg[1])
-		peer, ok := agent.peers.get(id)
-
-		// Discard messages until HELLO is received
-		if header != "HELLO" && (!ok || !peer.hello) {
-			continue
-		}
-
-		if header == "HELLO" {
-			fmt.Println("HELLO received from", id)
-			if !ok {
-				uuidBytes := uuid.Parse(id)
-				peerAddr := string(msg[2])
-				peer = agent.createPeer(uuidBytes, peerAddr)
+			case pipe:
+				// clientResponse received from front-end, handle it
+				msg, err = pipe.RecvMessageBytes(0)
 			}
-			peer.hello = true
-			peer.isAlive()
-			continue
-		}
 
-		peer.isAlive()
-		// else send to server thread
-		agent.pipe.SendMessage(msg)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Router recv err", err)
+				continue
+			}
+
+			// DEBUG fmt.Printf("router %T, %s, %d\n", msg, msg, len(msg))
+
+			id := string(msg[0])
+			header := string(msg[1])
+			switch header {
+			case "CREQ": // Client Request, pass to main thread
+				agent.pipe.SendMessage(msg)
+
+			case "CREP": // Reply for client received from main thread
+				// msgType not needed, it's always clientResponse
+				fmt.Println("Responding to client:", id)
+				agent.router.SendMessage(id, msg[2])
+
+			default:
+				peer, ok := agent.peers.get(id)
+				// Discard messages until HELLO is received
+				if header != "HELLO" && (!ok || !peer.hello) {
+					continue
+				}
+
+				if header == "HELLO" {
+					fmt.Println("HELLO received from", id)
+					if !ok {
+						uuidBytes := uuid.Parse(id)
+						peerAddr := string(msg[2])
+						peer = agent.createPeer(uuidBytes, peerAddr)
+					}
+					peer.hello = true
+					peer.isAlive()
+					continue
+				}
+
+				peer.isAlive()
+				// else send to server thread
+				agent.pipe.SendMessage(msg)
+			}
+		}
 	}
 }
 
@@ -213,19 +263,19 @@ func (agent *Agent) createPeer(uuid uuid.UUID, peerAddr string) (peer *Peer) {
 // Handle different control messages from the front-end
 func (agent *Agent) controlMessage() (err error) {
 	// Get the whole message off the pipe in one go
-	// [type, msg struct, recipient ID]
+	// [recipient ID, type, msg struct]
 	msg, e := agent.pipe.RecvMessageBytes(0)
 	if e != nil {
 		return e
 	}
 
-	peerID := string(msg[2])
+	peerID := string(msg[0])
 	peer, ok := agent.peers.get(peerID)
 	if !ok {
 		text := fmt.Sprintf("RVR err: peer (%s) not found\n", peerID)
 		return errors.New(text)
 	}
-	peer.send(msg[:2])
+	peer.send(msg[1:])
 
 	return
 }

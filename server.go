@@ -34,31 +34,6 @@ const (
 	leader
 )
 
-type requestVoteMsg struct {
-	Term         int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-type requestVoteResponse struct {
-	Term        int
-	VoteGranted bool
-}
-
-type appendEntriesMsg struct {
-	Term         int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []entry // log entries to store (empty for heartbeat)
-	LeaderCommit int     // leader's commitIndex
-}
-
-type appendEntriesResponse struct {
-	Term       int
-	Success    bool // true if follower had entry matching prevLog{Index, Term}
-	MatchIndex int
-}
-
 type candidateVars struct {
 	votesResponded map[string]bool // imitates set
 	votesGranted   map[string]bool
@@ -109,15 +84,16 @@ func (lv *leaderVars) setTimeout() {
 }
 
 type server struct {
-	uuid        uuid.UUID
-	iface       *intface.MessagingInterface
-	elog        *entryLog
-	currentTerm int
-	votedFor    string // the candidate the server voted for in the current term
-	state       serverState
-	servers     map[string]bool // set of other servers (len has to be incremented)
-	cVars       *candidateVars
-	lVars       *leaderVars
+	uuid          uuid.UUID
+	iface         *intface.MessagingInterface
+	elog          *entryLog
+	currentTerm   int
+	votedFor      string // the candidate the server voted for in the current term
+	state         serverState
+	currentLeader string
+	servers       map[string]bool // set of other servers (this server excluded)
+	cVars         *candidateVars
+	lVars         *leaderVars
 }
 
 func newServer() *server {
@@ -164,6 +140,33 @@ func (s *server) handleControlMessage(senderID, msgType string) {
 			delete(s.lVars.nextIndex, senderID)
 			delete(s.lVars.matchIndex, senderID)
 		}
+	}
+}
+
+func (s *server) handleClientRequest(senderID string, msg clientRequest) {
+	// TODO iface Send dostosowac / uaktualnic:
+	// - senderID jako pierwszy arg?
+	// - przesylac wiadomomosci przeznaczone dla klienta do routera
+	if s.state != leader {
+		s.iface.Send("CREP", clientResponse{Text: s.currentLeader}, senderID)
+		return
+	}
+
+	switch msg.Command {
+	case "RUALDR": // Are you a leader
+		s.iface.Send("CREP", clientResponse{Text: "Y"}, senderID)
+	case "GET":
+		if s.elog.itemCount > 0 {
+			s.elog.append(s.currentTerm, senderID, msg)
+			s.elog.itemCount--
+		} else {
+			s.iface.Send("CREP", clientResponse{Text: "RETRY"}, senderID)
+		}
+	case "PUT":
+		// TODO reject client request if buffer empty or full
+		// if s.elog.itemCount < MAX_ITEM_COUNT
+		s.elog.append(s.currentTerm, senderID, msg)
+		s.elog.itemCount++
 	}
 }
 
@@ -216,6 +219,7 @@ func (s *server) handleRequestVoteResponse(voterID string,
 	if s.state == candidate && s.isQuorum(len(s.cVars.votesGranted)+1) {
 		fmt.Println("candidate -> leader | term:", s.currentTerm)
 		s.state = leader
+		s.elog.calculateItemCount()
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
 	}
 }
@@ -344,6 +348,10 @@ func (s *server) advanceCommitIndex() {
 
 func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 	switch msgType {
+	case "CREQ":
+		var msgStruct clientRequest
+		err := json.Unmarshal(msg, &msgStruct)
+		return msgStruct, 0, err
 	case "RV":
 		var msgStruct requestVoteMsg
 		err := json.Unmarshal(msg, &msgStruct)
@@ -356,12 +364,10 @@ func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 		var msgStruct appendEntriesMsg
 		err := json.Unmarshal(msg, &msgStruct)
 		// fmt.Println("AppendEntries received |", msgStruct.Term)
-		fmt.Println(msgStruct)
 		return msgStruct, msgStruct.Term, err
 	case "AER":
 		var msgStruct appendEntriesResponse
 		err := json.Unmarshal(msg, &msgStruct)
-		fmt.Println("AER", msgStruct)
 		return msgStruct, msgStruct.Term, err
 	default:
 		text := fmt.Sprintf("decodeMessage mismatched msgType (%s)\n", msgType)
@@ -417,8 +423,10 @@ func (s *server) loop() {
 				}
 
 				var dropped bool // term was obsolete and message was dropped
-				// TODO client redirect
 				switch msg := message.(type) {
+				case clientRequest:
+					s.handleClientRequest(senderID, msg)
+
 				case requestVoteMsg:
 					dropped = s.handleRequestVote(senderID, msg)
 
@@ -430,6 +438,9 @@ func (s *server) loop() {
 					s.handleRequestVoteResponse(senderID, msg)
 
 				case appendEntriesMsg:
+					if s.currentLeader != senderID {
+						s.currentLeader = senderID
+					}
 					dropped = s.handleAppendEntries(senderID, msg)
 
 				case appendEntriesResponse:
@@ -443,13 +454,15 @@ func (s *server) loop() {
 
 				// reset the timeout only if message was not dropped
 				// XXX client request should not reset the timeout
-				if !dropped {
+				if !dropped && msgType != "CREQ" {
 					resetElectionTimeout()
 				}
 
-				fmt.Println("LOG:", s.elog.entries)
+				// fmt.Println(s.state, "LOG:", s.elog.entries)
 			}
 		}
+
+		clientID, response := s.elog.applyEntry()
 
 		switch s.state {
 		case follower:
@@ -471,14 +484,20 @@ func (s *server) loop() {
 			}
 
 		case leader:
+			if clientID != "" { // entry applied, respond to client
+				if clientID != "idididid" {
+					s.iface.Send("CREP", response, clientID)
+				}
+			}
 			if time.Now().After(s.lVars.hbTimeout) {
 				s.appendEntries(true) // heartbeat
 				s.lVars.setTimeout()
 				// TODO remove
 				nTimeoutsPassed++
 				if nTimeoutsPassed > 10 {
-					s.elog.append(s.currentTerm, "GET")
-					fmt.Println("LOG:", s.elog.entries)
+					s.elog.append(s.currentTerm, "idididid", clientRequest{"PUT", 5})
+					s.elog.itemCount++
+					fmt.Println("LOG:", s.elog.entries, "STATE:", s.elog.stateMachine)
 					nTimeoutsPassed = 0
 				}
 			}
