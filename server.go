@@ -212,7 +212,8 @@ func (s *server) handleRequestVoteResponse(voterID string,
 		s.cVars.votesGranted[voterID] = true
 	}
 
-	if s.state == candidate && s.isQuorum(len(s.cVars.votesGranted)) {
+	//                                              include itself v
+	if s.state == candidate && s.isQuorum(len(s.cVars.votesGranted)+1) {
 		fmt.Println("candidate -> leader | term:", s.currentTerm)
 		s.state = leader
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
