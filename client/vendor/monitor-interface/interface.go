@@ -140,6 +140,7 @@ func (m *Monitor) connectionHandler() {
 	var leaderID string
 	var serverAddr string
 	var connected bool
+	replyReceived := true
 	for {
 		if !connected {
 			for serverAddr == "" {
@@ -201,7 +202,9 @@ func (m *Monitor) connectionHandler() {
 				if err != nil {
 					panic(err)
 				}
+				// TODO if not connected then queue request or sth and wait
 				sock.SendMessage("CREQ", requestBytes)
+				replyReceived = false
 
 			case sock:
 				msg, err := sock.RecvMessageBytes(0)
@@ -217,11 +220,17 @@ func (m *Monitor) connectionHandler() {
 				case "Y":
 					connected = true
 					fmt.Println("Connected to", leaderID, serverAddr)
-				case "GET", "PUT":
-					requestSock.SendMessage(strconv.Itoa(response.Value))
+					if replyReceived {
+						break
+					}
+					// retry request if reply not received and leader changed
+					fallthrough
 				case "RETRY":
 					time.Sleep(100 * time.Millisecond)
 					sock.SendMessage("CREQ", requestBytes)
+				case "GET", "PUT":
+					replyReceived = true
+					requestSock.SendMessage(strconv.Itoa(response.Value))
 				default: // redirect, response.Text == uuid
 					sock.Disconnect(serverAddr)
 					connected = false
@@ -248,7 +257,6 @@ func (m *Monitor) Get() int {
 
 // Put sends put request
 func (m *Monitor) Put(value int) int {
-	// TODO strconv?
 	m.requestSock.SendMessage("PUT", value)
 	_, err := m.requestSock.RecvMessage(0)
 	if err != nil {

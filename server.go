@@ -495,7 +495,7 @@ func (s *server) loop() {
 				// TODO remove
 				nTimeoutsPassed++
 				if nTimeoutsPassed > 10 {
-					s.elog.append(s.currentTerm, "idididid", clientRequest{"PUT", 5})
+					s.elog.append(s.currentTerm, "idididid", clientRequest{"PUT", int(time.Now().Unix())})
 					s.elog.itemCount++
 					fmt.Println("LOG:", s.elog.entries, "STATE:", s.elog.stateMachine)
 					nTimeoutsPassed = 0
