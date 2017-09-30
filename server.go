@@ -148,25 +148,31 @@ func (s *server) handleClientRequest(senderID string, msg clientRequest) {
 	// - senderID jako pierwszy arg?
 	// - przesylac wiadomomosci przeznaczone dla klienta do routera
 	if s.state != leader {
+		fmt.Println("Redirecting client", senderID[:8], "to leader")
 		s.iface.Send("CREP", clientResponse{Text: s.currentLeader}, senderID)
 		return
 	}
 
 	switch msg.Command {
 	case "RUALDR": // Are you a leader
+		fmt.Println("Confirming client", senderID[:8], "RUALDR request")
 		s.iface.Send("CREP", clientResponse{Text: "Y"}, senderID)
 	case "GET":
 		if s.elog.itemCount > 0 {
 			s.elog.append(s.currentTerm, senderID, msg)
 			s.elog.itemCount--
 		} else {
+			fmt.Println("Buffer empty, sending RETRY to", senderID[:8])
 			s.iface.Send("CREP", clientResponse{Text: "RETRY"}, senderID)
 		}
 	case "PUT":
-		// TODO reject client request if buffer empty or full
-		// if s.elog.itemCount < MAX_ITEM_COUNT
-		s.elog.append(s.currentTerm, senderID, msg)
-		s.elog.itemCount++
+		if s.elog.itemCount < s.elog.maxSize {
+			s.elog.append(s.currentTerm, senderID, msg)
+			s.elog.itemCount++
+		} else {
+			fmt.Println("Buffer full, sending RETRY to", senderID[:8])
+			s.iface.Send("CREP", clientResponse{Text: "RETRY"}, senderID)
+		}
 	}
 }
 
@@ -224,33 +230,31 @@ func (s *server) handleRequestVoteResponse(voterID string,
 	}
 }
 
-func (s *server) appendEntries(heartbeat bool) {
-	if heartbeat { // send appendEntries with empty entries[]
-		for serverID, nextIndex := range s.lVars.nextIndex {
-			prevLogIndex := nextIndex - 1
-			prevLogTerm := 0
-			if prevLogIndex >= 0 {
-				prevLogTerm = s.elog.entries[prevLogIndex].Term
-			}
-			// up to 1 entry
-			var lastEntry int // = min(len(log), index+1)
-			if len(s.elog.entries) < nextIndex+1 {
-				lastEntry = len(s.elog.entries)
-			} else {
-				lastEntry = nextIndex + 1
-			}
-			// XXX nextIndex a len
-			entries := s.elog.entries[nextIndex:lastEntry]
-
-			msg := appendEntriesMsg{
-				Term:         s.currentTerm,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
-				LeaderCommit: s.elog.commitIndex,
-			}
-			s.iface.Send("AE", msg, serverID)
+func (s *server) appendEntries() {
+	for serverID, nextIndex := range s.lVars.nextIndex {
+		prevLogIndex := nextIndex - 1
+		prevLogTerm := 0
+		if prevLogIndex >= 0 {
+			prevLogTerm = s.elog.entries[prevLogIndex].Term
 		}
+		// up to 1 entry
+		var lastEntry int // = min(len(log), index+1)
+		if len(s.elog.entries) < nextIndex+1 {
+			lastEntry = len(s.elog.entries)
+		} else {
+			lastEntry = nextIndex + 1
+		}
+		// XXX nextIndex a len
+		entries := s.elog.entries[nextIndex:lastEntry]
+
+		msg := appendEntriesMsg{
+			Term:         s.currentTerm,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
+			LeaderCommit: s.elog.commitIndex,
+		}
+		s.iface.Send("AE", msg, serverID)
 	}
 }
 
@@ -457,12 +461,13 @@ func (s *server) loop() {
 				if !dropped && msgType != "CREQ" {
 					resetElectionTimeout()
 				}
-
-				// fmt.Println(s.state, "LOG:", s.elog.entries)
 			}
 		}
 
 		clientID, response := s.elog.applyEntry()
+		if clientID != "" && s.state != leader {
+			fmt.Println("STATE", s.elog.stateMachine)
+		}
 
 		switch s.state {
 		case follower:
@@ -485,22 +490,37 @@ func (s *server) loop() {
 
 		case leader:
 			if clientID != "" { // entry applied, respond to client
-				if clientID != "idididid" {
-					s.iface.Send("CREP", response, clientID)
-				}
+				fmt.Println("Responding to client", clientID[:8], response)
+				fmt.Println("STATE", s.elog.stateMachine)
+				s.iface.Send("CREP", response, clientID)
 			}
+
 			if time.Now().After(s.lVars.hbTimeout) {
-				s.appendEntries(true) // heartbeat
+				s.appendEntries()
 				s.lVars.setTimeout()
 				// TODO remove
 				nTimeoutsPassed++
 				if nTimeoutsPassed > 10 {
-					s.elog.append(s.currentTerm, "idididid", clientRequest{"PUT", int(time.Now().Unix())})
-					s.elog.itemCount++
-					fmt.Println("LOG:", s.elog.entries, "STATE:", s.elog.stateMachine)
+					s.prettyPrintLog()
 					nTimeoutsPassed = 0
 				}
 			}
 		}
+	}
+}
+
+func (s *server) prettyPrintLog() {
+	var (
+		i int
+		e entry
+	)
+	for i, e = range s.elog.entries {
+		fmt.Print(e, " ")
+		if (i+1)%4 == 0 {
+			fmt.Printf("\n")
+		}
+	}
+	if (i+1)%4 != 0 {
+		fmt.Printf("\n")
 	}
 }

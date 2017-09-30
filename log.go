@@ -17,6 +17,7 @@ type entryLog struct {
 	commitIndex  int // index of the latest entry the state machine may apply
 	lastApplied  int // index of highest log entry applied to state machine
 	itemCount    int
+	maxSize      int
 	stateMachine []int
 }
 
@@ -26,6 +27,7 @@ func newLog() *entryLog {
 		commitIndex:  -1,
 		lastApplied:  -1,
 		itemCount:    0,
+		maxSize:      10,
 		stateMachine: make([]int, 0),
 	}
 }
@@ -85,8 +87,8 @@ func (l *entryLog) applyEntry() (clientID string, response clientResponse) {
 				l.stateMachine[last], l.stateMachine[:last]
 		case "PUT":
 			l.stateMachine = append(l.stateMachine, request.Argument)
+			response.Value = request.Argument
 		}
-		fmt.Println("STATE", l.stateMachine)
 	}
 
 	return

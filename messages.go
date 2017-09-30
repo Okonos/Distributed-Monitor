@@ -1,6 +1,6 @@
 package main
 
-import "strconv"
+import "fmt"
 
 type requestVoteMsg struct {
 	Term         int
@@ -34,9 +34,9 @@ type clientRequest struct {
 
 func (req clientRequest) String() string {
 	if req.Command == "PUT" {
-		return req.Command + " " + strconv.Itoa(req.Argument)
+		return fmt.Sprintf("%s %2d", req.Command, req.Argument)
 	}
-	return req.Command
+	return req.Command + "   " // 3 spaces for alignment
 }
 
 type clientResponse struct {

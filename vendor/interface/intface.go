@@ -224,7 +224,6 @@ func (agent *Agent) routerLoop() {
 
 			case "CREP": // Reply for client received from main thread
 				// msgType not needed, it's always clientResponse
-				fmt.Println("Responding to client:", id)
 				agent.router.SendMessage(id, msg[2])
 
 			default:

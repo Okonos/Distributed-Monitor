@@ -98,7 +98,6 @@ func (m *Monitor) listenForServers() {
 			checkExpiry := func(k, v interface{}) bool {
 				id := k.(string)
 				if time.Now().After(expiry[id]) {
-					// TODO if it was leader, notify main thread?
 					m.servers.Delete(k)
 					delete(expiry, id)
 					notifierSock.SendMessage(id)
@@ -136,10 +135,13 @@ func (m *Monitor) connectionHandler() {
 	poller.Add(requestSock, zmq.POLLIN)
 	poller.Add(sock, zmq.POLLIN)
 
-	var requestBytes []byte
-	var leaderID string
-	var serverAddr string
-	var connected bool
+	var (
+		requestBytes  []byte
+		leaderID      string
+		serverAddr    string
+		connected     bool
+		requestQueued bool
+	)
 	replyReceived := true
 	for {
 		if !connected {
@@ -194,7 +196,6 @@ func (m *Monitor) connectionHandler() {
 				cmd := msg[0]
 				request := clientRequest{Command: cmd}
 				if cmd == "PUT" {
-					fmt.Printf("TYPE %T %s\n", msg[1], msg[1])
 					argument, _ := strconv.Atoi(msg[1])
 					request.Argument = argument
 				}
@@ -203,8 +204,12 @@ func (m *Monitor) connectionHandler() {
 					panic(err)
 				}
 				// TODO if not connected then queue request or sth and wait
-				sock.SendMessage("CREQ", requestBytes)
-				replyReceived = false
+				if connected {
+					sock.SendMessage("CREQ", requestBytes)
+					replyReceived = false
+				} else {
+					requestQueued = true
+				}
 
 			case sock:
 				msg, err := sock.RecvMessageBytes(0)
@@ -241,6 +246,11 @@ func (m *Monitor) connectionHandler() {
 				}
 			}
 		}
+		if connected && requestQueued {
+			requestQueued = false
+			sock.SendMessage("CREQ", requestBytes)
+			replyReceived = false
+		}
 	}
 }
 
@@ -265,11 +275,7 @@ func (m *Monitor) Put(value int) int {
 	return 0
 }
 
-// Check check
-func (m *Monitor) Check() {
-	f := func(k, v interface{}) bool {
-		fmt.Println(k, v.(string))
-		return true
-	}
-	m.servers.Range(f)
+// GetID returns monitor's ID
+func (m *Monitor) GetID() string {
+	return m.id
 }
