@@ -238,7 +238,7 @@ func (m *Monitor) connectionHandler() {
 
 				switch response.Text {
 				case "RETRY":
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(200 * time.Millisecond)
 					sock.SendMessage("CREQ", requestBytes)
 				case "GET", "PUT":
 					replyReceived = true

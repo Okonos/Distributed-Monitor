@@ -144,9 +144,6 @@ func (s *server) handleControlMessage(senderID, msgType string) {
 }
 
 func (s *server) handleClientRequest(senderID string, msg clientRequest) {
-	// TODO iface Send dostosowac / uaktualnic:
-	// - senderID jako pierwszy arg?
-	// - przesylac wiadomomosci przeznaczone dla klienta do routera
 	if s.state != leader {
 		fmt.Println("Redirecting client", senderID[:8], "to leader")
 		s.iface.Send("CREP", clientResponse{Text: s.currentLeader}, senderID)
@@ -391,7 +388,7 @@ func (s *server) loop() {
 	}
 	resetElectionTimeout()
 
-	// TODO remove
+	// currently used by leader for periodic log printing
 	nTimeoutsPassed := 0
 
 	for {
@@ -450,7 +447,7 @@ func (s *server) loop() {
 						break
 					}
 					s.handleAppendEntriesResponse(senderID, msg)
-					s.advanceCommitIndex() // TODO tylko tu?
+					s.advanceCommitIndex() // chyba tylko tu
 				}
 
 				// reset the timeout only if message was not dropped
@@ -495,7 +492,7 @@ func (s *server) loop() {
 			if time.Now().After(s.lVars.hbTimeout) {
 				s.appendEntries()
 				s.lVars.setTimeout()
-				// TODO remove
+				// periodic log printing
 				nTimeoutsPassed++
 				if nTimeoutsPassed > 10 {
 					s.prettyPrintLog()
@@ -520,4 +517,5 @@ func (s *server) prettyPrintLog() {
 	if (i+1)%4 != 0 {
 		fmt.Printf("\n")
 	}
+	fmt.Printf("\n")
 }
