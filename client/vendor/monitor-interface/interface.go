@@ -143,6 +143,19 @@ func (m *Monitor) connectionHandler() {
 		requestQueued bool
 	)
 	replyReceived := true
+	disconnectAndUpdateLeader := func(serverID string) {
+		sock.Disconnect(serverAddr)
+		connected = false
+		if serverID != "" {
+			leaderID = serverID
+			if addr, ok := m.servers.Load(leaderID); ok {
+				serverAddr = addr.(string)
+				return
+			}
+		}
+		serverAddr = ""
+	}
+
 	for {
 		if !connected {
 			for serverAddr == "" {
@@ -159,20 +172,24 @@ func (m *Monitor) connectionHandler() {
 				panic(err)
 			}
 			time.Sleep(100 * time.Millisecond)
+			connected = true
+			fmt.Println("Connected to", leaderID, serverAddr)
 
-			// "are you a leader" request
-			request := clientRequest{Command: "RUALDR"}
-			msgBytes, err := json.Marshal(request)
-			if err != nil {
-				panic(err)
+			// retry request if not sent or reply not received
+			if !replyReceived || requestQueued {
+				sock.SendMessage("CREQ", requestBytes)
+				if requestQueued {
+					requestQueued = false
+					replyReceived = false
+				}
 			}
-			sock.SendMessage("CREQ", msgBytes)
 		}
 
 		sockets, err := poller.Poll(-1)
 		if err != nil {
 			panic(err)
 		}
+
 		for _, socket := range sockets {
 			switch s := socket.Socket; s {
 			case notifierSock: // when server leaves/dies
@@ -182,13 +199,11 @@ func (m *Monitor) connectionHandler() {
 				}
 				leaverID := msg[0]
 				if leaverID == leaderID {
-					sock.Disconnect(serverAddr)
-					serverAddr = ""
-					connected = false
+					disconnectAndUpdateLeader("")
 					fmt.Println("Leader died, attempting reconnect")
 				}
 
-			case requestSock:
+			case requestSock: // request from application
 				msg, err := requestSock.RecvMessage(0)
 				if err != nil {
 					panic(err)
@@ -203,7 +218,6 @@ func (m *Monitor) connectionHandler() {
 				if err != nil {
 					panic(err)
 				}
-				// TODO if not connected then queue request or sth and wait
 				if connected {
 					sock.SendMessage("CREQ", requestBytes)
 					replyReceived = false
@@ -211,45 +225,32 @@ func (m *Monitor) connectionHandler() {
 					requestQueued = true
 				}
 
-			case sock:
+			case sock: // message from server
 				msg, err := sock.RecvMessageBytes(0)
 				if err != nil {
 					panic(err)
 				}
-
+				serverID := string(msg[0])
 				var response clientResponse
-				if err = json.Unmarshal(msg[0], &response); err != nil {
+				if err = json.Unmarshal(msg[1], &response); err != nil {
 					panic(err)
 				}
+
 				switch response.Text {
-				case "Y":
-					connected = true
-					fmt.Println("Connected to", leaderID, serverAddr)
-					if replyReceived {
-						break
-					}
-					// retry request if reply not received and leader changed
-					fallthrough
 				case "RETRY":
 					time.Sleep(100 * time.Millisecond)
 					sock.SendMessage("CREQ", requestBytes)
 				case "GET", "PUT":
 					replyReceived = true
+					if serverID != leaderID { // new leader; reconnect
+						disconnectAndUpdateLeader(serverID)
+					}
 					requestSock.SendMessage(strconv.Itoa(response.Value))
 				default: // redirect, response.Text == uuid
-					sock.Disconnect(serverAddr)
-					connected = false
-					leaderID = response.Text
-					if addr, ok := m.servers.Load(leaderID); ok {
-						serverAddr = addr.(string)
-					}
+					disconnectAndUpdateLeader(response.Text)
+					fmt.Println("Being redirected to", leaderID[:8], serverAddr)
 				}
 			}
-		}
-		if connected && requestQueued {
-			requestQueued = false
-			sock.SendMessage("CREQ", requestBytes)
-			replyReceived = false
 		}
 	}
 }

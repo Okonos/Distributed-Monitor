@@ -224,7 +224,7 @@ func (agent *Agent) routerLoop() {
 
 			case "CREP": // Reply for client received from main thread
 				// msgType not needed, it's always clientResponse
-				agent.router.SendMessage(id, msg[2])
+				agent.router.SendMessage(id, agent.uuidString, msg[2])
 
 			default:
 				peer, ok := agent.peers.get(id)

@@ -154,9 +154,6 @@ func (s *server) handleClientRequest(senderID string, msg clientRequest) {
 	}
 
 	switch msg.Command {
-	case "RUALDR": // Are you a leader
-		fmt.Println("Confirming client", senderID[:8], "RUALDR request")
-		s.iface.Send("CREP", clientResponse{Text: "Y"}, senderID)
 	case "GET":
 		if s.elog.itemCount > 0 {
 			s.elog.append(s.currentTerm, senderID, msg)
