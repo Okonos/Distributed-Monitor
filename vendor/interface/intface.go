@@ -296,7 +296,7 @@ func (agent *Agent) handleBeacon() (err error) {
 		uuidString := uuid.String()
 		peer, ok := agent.peers.get(uuidString)
 		if !ok {
-			fmt.Println("BEACON:", peerAddr)
+			// fmt.Println("BEACON:", peerAddr)
 			peer = agent.createPeer(uuid, peerAddr)
 			// Report peer joined the network
 			agent.pipe.SendMessage(uuid, "JOINED")

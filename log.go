@@ -89,6 +89,8 @@ func (l *entryLog) applyEntry() (clientID string, response clientResponse) {
 			l.stateMachine = append(l.stateMachine, request.Argument)
 			response.Value = request.Argument
 		}
+
+		fmt.Println("STATE", l.stateMachine)
 	}
 
 	return

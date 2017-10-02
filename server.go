@@ -10,6 +10,7 @@ import (
 
 	"interface"
 
+	"github.com/fatih/color"
 	"github.com/pborman/uuid"
 )
 
@@ -201,14 +202,14 @@ func (s *server) handleRequestVote(candidateID string, msg requestVoteMsg) bool 
 	response.VoteGranted = voteGranted
 	s.iface.Send("RVR", response, candidateID)
 
-	fmt.Println("XXX handleRequestVote: voteGranted ==", voteGranted)
+	color.Blue("Vote granted (%t) to %s", voteGranted, candidateID[:8])
 
 	return false
 }
 
 func (s *server) handleRequestVoteResponse(voterID string,
 	msg requestVoteResponse) {
-	fmt.Println("YYY handleRequestVoteResponse:", msg)
+	fmt.Println("Vote from", voterID[:8], msg)
 
 	s.cVars.votesResponded[voterID] = true
 	if msg.VoteGranted {
@@ -217,7 +218,7 @@ func (s *server) handleRequestVoteResponse(voterID string,
 
 	//                                              include itself v
 	if s.state == candidate && s.isQuorum(len(s.cVars.votesGranted)+1) {
-		fmt.Println("candidate -> leader | term:", s.currentTerm)
+		color.Red("candidate -> leader | term: %d", s.currentTerm)
 		s.state = leader
 		s.elog.calculateItemCount()
 		s.lVars.reset(s.getServersIDs(), s.elog.lastIndex())
@@ -336,10 +337,10 @@ func (s *server) advanceCommitIndex() {
 		}
 	}
 	if maxAgreeIndex != -1 && s.elog.entries[maxAgreeIndex].Term == s.currentTerm {
-		if s.elog.commitIndex != maxAgreeIndex {
-			fmt.Println("CommitIndex advanced from",
-				s.elog.commitIndex, "to", maxAgreeIndex)
-		}
+		// if s.elog.commitIndex != maxAgreeIndex {
+		// 	fmt.Println("CommitIndex advanced from",
+		// 		s.elog.commitIndex, "to", maxAgreeIndex)
+		// }
 		s.elog.commitIndex = maxAgreeIndex
 	}
 }
@@ -413,7 +414,8 @@ func (s *server) loop() {
 				// "if candidate's or leader's term is out of date,
 				// it immediately reverts to follower state"
 				if term > s.currentTerm {
-					fmt.Println(s.state, "-> follower | term:", s.currentTerm)
+					color.Green("%s -> follower | term: %d",
+						s.state, s.currentTerm)
 					s.state = follower
 					s.currentTerm = term
 					s.votedFor = ""
@@ -440,6 +442,7 @@ func (s *server) loop() {
 						s.currentLeader = senderID
 					}
 					dropped = s.handleAppendEntries(senderID, msg)
+					s.elog.applyEntry()
 
 				case appendEntriesResponse:
 					if term < s.currentTerm { // drop stale responses
@@ -448,6 +451,11 @@ func (s *server) loop() {
 					}
 					s.handleAppendEntriesResponse(senderID, msg)
 					s.advanceCommitIndex() // chyba tylko tu
+					clientID, response := s.elog.applyEntry()
+					if clientID != "" { // entry applied, respond to client
+						fmt.Println("Responding to client", clientID[:8], response)
+						s.iface.Send("CREP", response, clientID)
+					}
 				}
 
 				// reset the timeout only if message was not dropped
@@ -458,16 +466,16 @@ func (s *server) loop() {
 			}
 		}
 
-		clientID, response := s.elog.applyEntry()
-		if clientID != "" && s.state != leader {
-			fmt.Println("STATE", s.elog.stateMachine)
-		}
+		// clientID, response := s.elog.applyEntry()
+		// if clientID != "" && s.state != leader {
+		// 	fmt.Println("STATE", s.elog.stateMachine)
+		// }
 
 		switch s.state {
 		case follower:
 			// check election timeout
 			if time.Now().After(timeout) {
-				fmt.Println("follower -> candidate | term:", s.currentTerm)
+				color.Yellow("follower -> candidate | term: %d", s.currentTerm)
 				s.state = candidate
 				s.cVars.reset()
 			}
@@ -483,11 +491,6 @@ func (s *server) loop() {
 			}
 
 		case leader:
-			if clientID != "" { // entry applied, respond to client
-				fmt.Println("Responding to client", clientID[:8], response)
-				fmt.Println("STATE", s.elog.stateMachine)
-				s.iface.Send("CREP", response, clientID)
-			}
 
 			if time.Now().After(s.lVars.hbTimeout) {
 				s.appendEntries()

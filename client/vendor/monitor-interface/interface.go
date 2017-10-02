@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/pborman/uuid"
 	zmq "github.com/pebbe/zmq4"
 )
@@ -173,7 +174,8 @@ func (m *Monitor) connectionHandler() {
 			}
 			time.Sleep(100 * time.Millisecond)
 			connected = true
-			fmt.Println("Connected to", leaderID, serverAddr)
+			color.Green("%s connected to %s %s",
+				m.id[:8], leaderID[:8], serverAddr)
 
 			// retry request if not sent or reply not received
 			if !replyReceived || requestQueued {
@@ -199,8 +201,8 @@ func (m *Monitor) connectionHandler() {
 				}
 				leaverID := msg[0]
 				if leaverID == leaderID {
+					color.Blue("%s Leader died, attempting reconnect", m.id[:8])
 					disconnectAndUpdateLeader("")
-					fmt.Println("Leader died, attempting reconnect")
 				}
 
 			case requestSock: // request from application
@@ -238,17 +240,20 @@ func (m *Monitor) connectionHandler() {
 
 				switch response.Text {
 				case "RETRY":
-					time.Sleep(200 * time.Millisecond)
+					time.Sleep(500 * time.Millisecond)
 					sock.SendMessage("CREQ", requestBytes)
 				case "GET", "PUT":
 					replyReceived = true
 					if serverID != leaderID { // new leader; reconnect
+						color.Blue("%s New leader detected -- reconnecting",
+							m.id[:8])
 						disconnectAndUpdateLeader(serverID)
 					}
 					requestSock.SendMessage(strconv.Itoa(response.Value))
 				default: // redirect, response.Text == uuid
+					color.Blue("%s Being redirected to %s %s",
+						m.id[:8], leaderID[:8], serverAddr)
 					disconnectAndUpdateLeader(response.Text)
-					fmt.Println("Being redirected to", leaderID[:8], serverAddr)
 				}
 			}
 		}
