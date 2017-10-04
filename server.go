@@ -362,7 +362,6 @@ func decodeMessage(msgType string, msg []byte) (interface{}, int, error) {
 	case "AE":
 		var msgStruct appendEntriesMsg
 		err := json.Unmarshal(msg, &msgStruct)
-		// fmt.Println("AppendEntries received |", msgStruct.Term)
 		return msgStruct, msgStruct.Term, err
 	case "AER":
 		var msgStruct appendEntriesResponse
@@ -398,8 +397,6 @@ func (s *server) loop() {
 			fmt.Fprintln(os.Stderr, "ERROR in iface.Recv:", err)
 			continue
 		}
-
-		// fmt.Printf("server loop: [%s, %s, %v]\n", senderID, msgType, msgStruct)
 
 		if err == nil { // Message was received
 			switch msgType {
@@ -466,11 +463,6 @@ func (s *server) loop() {
 			}
 		}
 
-		// clientID, response := s.elog.applyEntry()
-		// if clientID != "" && s.state != leader {
-		// 	fmt.Println("STATE", s.elog.stateMachine)
-		// }
-
 		switch s.state {
 		case follower:
 			// check election timeout
@@ -491,7 +483,6 @@ func (s *server) loop() {
 			}
 
 		case leader:
-
 			if time.Now().After(s.lVars.hbTimeout) {
 				s.appendEntries()
 				s.lVars.setTimeout()

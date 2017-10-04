@@ -50,7 +50,7 @@ func (l *entryLog) candidateIsUpToDate(term, index int) bool {
 	logTerm := l.lastTerm()
 	if term == logTerm {
 		// XXX since this checks which log is longer, the index must be incremented
-		// (indexing from 0 as opposed to indexing from one in paper)
+		// (indexing from 0 as opposed to indexing from 1 in paper)
 		return index+1 >= logLen
 	}
 	return term > logTerm

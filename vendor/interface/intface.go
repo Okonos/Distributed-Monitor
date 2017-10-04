@@ -53,7 +53,7 @@ func New(uuid uuid.UUID) (iface *MessagingInterface) {
 	return
 }
 
-// Send : send a message to backend; args are optional (e.g. recipient's id)
+// Send : send a message to backend
 func (iface *MessagingInterface) Send(cmd string, msg interface{}, rcvrID string) {
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -62,7 +62,7 @@ func (iface *MessagingInterface) Send(cmd string, msg interface{}, rcvrID string
 	}
 
 	var pipe *zmq.Socket
-	if cmd == "CREP" {
+	if cmd == "CREP" { // client response, send to router
 		pipe = iface.routerPipe
 	} else {
 		pipe = iface.pipe
